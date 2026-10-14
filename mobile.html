@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Clips4U Mobile Video Clipper</title>
+  <meta name="description" content="Create and export short mobile-friendly clips locally in your browser with Clips4U Mobile Clipper.">
+  <style>
+    :root {
+      --bg: #071426;
+      --bg-2: #0d2039;
+      --card: rgba(12, 28, 48, 0.96);
+      --card-2: rgba(17, 42, 72, 0.94);
+      --line: rgba(255,255,255,0.12);
+      --text: #edf5ff;
+      --muted: #bfd0eb;
+      --blue: #23b7ff;
+      --gold: #ffb41f;
+      --orange: #ff7a18;
+      --green: #5ee59c;
+      --danger: #ff6b6b;
+      --shadow: 0 24px 72px rgba(0,0,0,0.42);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, "Segoe UI", Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% 0%, rgba(35,183,255,0.14), transparent 28%),
+        radial-gradient(circle at 90% 8%, rgba(255,180,31,0.12), transparent 30%),
+        var(--bg);
+      min-height: 100vh;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    button, input, select {
+      font: inherit;
+    }
+
+    .shell {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 18px 14px 40px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 0 18px;
+    }
+
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--line);
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(94,229,156,0.08);
+      border: 1px solid rgba(94,229,156,0.28);
+      color: #d3ffe4;
+      font-size: 0.8rem;
+      font-weight: 700;
+    }
+
+    .panel {
+      background: linear-gradient(180deg, rgba(17,42,72,0.94), rgba(9,27,48,0.94));
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 4px 0 8px;
+      font-size: clamp(2rem, 7vw, 3rem);
+      line-height: 1.04;
+      letter-spacing: -0.05em;
+    }
+
+    .lede {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    .file-picker {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 52px;
+      border-radius: 14px;
+      border: 1px dashed rgba(35,183,255,0.9);
+      background: rgba(35,183,255,0.08);
+      color: var(--text);
+      font-weight: 800;
+      cursor: pointer;
+      transition: transform 0.15s ease, background 0.15s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .file-picker:active { transform: scale(0.99); }
+    .file-picker input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    .meta {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    .video-wrap {
+      margin-top: 16px;
+      border-radius: 18px;
+      overflow: hidden;
+      background: rgba(0,0,0,0.18);
+      border: 1px solid var(--line);
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      max-height: 52vh;
+      background: #020c17;
+    }
+
+    .controls-grid {
+      display: grid;
+      gap: 18px;
+      margin-top: 18px;
+      grid-template-columns: 1fr;
+    }
+
+    .time-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .control-box {
+      padding: 12px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--line);
+    }
+
+    .label-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 0.92rem;
+    }
+
+    .range-wrap {
+      display: grid;
+      gap: 8px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--blue);
+      min-height: 34px;
+    }
+
+    input[type="text"],
+    select {
+      width: 100%;
+      min-height: 46px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(7,20,38,0.9);
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 1rem;
+    }
+
+    .chip-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .button,
+    .secondary-button,
+    .danger-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 50px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      font-weight: 800;
+      text-align: center;
+      transition: transform 0.15s ease, opacity 0.15s ease;
+    }
+
+    .button:active,
+    .secondary-button:active,
+    .danger-button:active { transform: scale(0.99); }
+
+    .button {
+      color: #091321;
+      background: linear-gradient(135deg, var(--gold), var(--orange));
+      box-shadow: 0 12px 28px rgba(255,144,24,0.25);
+    }
+
+    .secondary-button {
+      background: rgba(255,255,255,0.04);
+      border-color: var(--line);
+      color: var(--text);
+    }
+
+    .danger-button {
+      background: rgba(255,107,107,0.08);
+      border-color: rgba(255,107,107,0.3);
+      color: #ffd6d6;
+    }
+
+    .button[disabled],
+    .secondary-button[disabled],
+    .danger-button[disabled] {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .inline-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .option-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .radio {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      color: var(--text);
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .radio input {
+      accent-color: var(--blue);
+      width: 18px;
+      height: 18px;
+    }
+
+    .status {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      font-weight: 700;
+      border: 1px solid rgba(35,183,255,.24);
+      background: rgba(35,183,255,.08);
+      color: #d9f4ff;
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+    }
+
+    .status.error {
+      border-color: rgba(255,107,107,0.28);
+      background: rgba(255,107,107,0.08);
+      color: #ffd5d5;
+    }
+
+    .status.success {
+      border-color: rgba(94,229,156,0.28);
+      background: rgba(94,229,156,0.08);
+      color: #dcffe8;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid var(--line);
+      overflow: hidden;
+      margin-top: 12px;
+      display: none;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--blue), var(--gold));
+      transition: width 0.2s ease;
+    }
+
+    .info-note {
+      margin-top: 14px;
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: rgba(255,180,31,0.07);
+      border: 1px solid rgba(255,180,31,0.22);
+      color: #f7e0b7;
+      font-size: 0.94rem;
+    }
+
+    .output-panel {
+      display: none;
+      margin-top: 18px;
+    }
+
+    .output-panel.visible {
+      display: block;
+    }
+
+    .share-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .share-row a,
+    .share-row button {
+      flex: 1 1 180px;
+    }
+
+    .smallprint {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 640px) {
+      .shell { padding-left: 12px; padding-right: 12px; }
+      .topbar { align-items: flex-start; }
+      .time-grid, .option-grid { grid-template-columns: 1fr; }
+      .button, .secondary-button, .danger-button { width: 100%; }
+      .share-row a, .share-row button { flex-basis: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="back-link" href="index.html">← Clips4U</a>
+      <span class="pill">Local browser export</span>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h1>Mobile Video Clipper</h1>
+        <p class="lede">Choose a local video, trim it on your phone, and export a one-off clip without uploading anything to a server.</p>
+
+        <label class="file-picker" for="videoInput">
+          <input id="videoInput" type="file" accept="video/*">
+          <span>Select local video</span>
+        </label>
+
+        <div id="fileMeta" class="meta">No video selected yet.</div>
+
+        <div class="video-wrap">
+          <video id="sourceVideo" playsinline controls preload="metadata"></video>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="controls-grid">
+          <div class="control-box">
+            <div class="label-row">
+              <span>Clip timing</span>
+              <span id="durationLabel">00:00</span>
+            </div>
+
+            <div class="time-grid">
+              <div>
+                <label class="label-row" for="startRange"><span>Start</span><strong id="startValue">00:00</strong></label>
+                <div class="range-wrap">
+                  <input id="startRange" type="range" min="0" max="0" step="0.1" value="0">
+                  <input id="startInput" type="text" inputmode="decimal" value="00:00">
+                </div>
+              </div>
+              <div>
+                <label class="label-row" for="endRange"><span>End</span><strong id="endValue">00:00</strong></label>
+                <div class="range-wrap">
+                  <input id="endRange" type="range" min="0" max="0" step="0.1" value="0">
+                  <input id="endInput" type="text" inputmode="decimal" value="00:00">
+                </div>
+              </div>
+            </div>
+
+            <div class="inline-actions">
+              <button class="secondary-button" id="setStartBtn" type="button">Set start to current position</button>
+              <button class="button" id="previewBtn" type="button">Preview selected clip</button>
+            </div>
+
+            <div class="chip-group" style="margin-top:14px;">
+              <button class="secondary-button" data-length="15" type="button">15s</button>
+              <button class="secondary-button" data-length="20" type="button">20s</button>
+              <button class="secondary-button" data-length="30" type="button">30s</button>
+              <button class="secondary-button" data-length="45" type="button">45s</button>
+              <button class="secondary-button" data-length="60" type="button">60s</button>
+            </div>
+          </div>
+
+          <div class="control-box">
+            <div class="label-row"><span>Export style</span></div>
+            <div class="option-grid">
+              <label class="radio"><input type="radio" name="exportStyle" value="original" checked> Original aspect</label>
+              <label class="radio"><input type="radio" name="exportStyle" value="vertical-blur"> 9:16 vertical + blur</label>
+              <label class="radio"><input type="radio" name="exportStyle" value="center-crop"> 9:16 center crop</label>
+              <label class="radio"><input type="radio" name="exportStyle" value="classic-vertical"> 9:16 full frame</label>
+            </div>
+
+            <div class="label-row" style="margin-top:16px;"><span>Output resolution</span></div>
+            <select id="resolutionSelect">
+              <option value="540x960">540 × 960</option>
+              <option value="720x1280">720 × 1280</option>
+            </select>
+
+            <div class="inline-actions">
+              <button class="button" id="processBtn" type="button">Process clip</button>
+            </div>
+
+            <div id="progressTrack" class="progress-track" aria-live="polite">
+              <div id="progressBar" class="progress-bar"></div>
+            </div>
+            <div id="status" class="status">Select a local video to begin.</div>
+          </div>
+        </div>
+
+        <div class="info-note">
+          On iPhone, after processing, tap <strong>Share / Save Video</strong> and choose <strong>Save Video</strong> in the iOS share sheet to save the finished clip to Photos.
+        </div>
+      </section>
+
+      <section id="outputPanel" class="panel output-panel">
+        <h2 style="margin-top:0; margin-bottom:10px;">Finished clip</h2>
+        <div class="video-wrap">
+          <video id="outputVideo" playsinline controls preload="metadata"></video>
+        </div>
+
+        <div class="share-row">
+          <button class="button" id="shareBtn" type="button">Share / Save Video</button>
+          <a id="downloadLink" class="secondary-button" href="#" download="clips4u-mobile-clip.mp4">Download MP4</a>
+        </div>
+
+        <div class="smallprint">This process runs entirely in your browser using FFmpeg.wasm. The original source never leaves your device.</div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module">
+    const state = {
+      file: null,
+      name: '',
+      duration: 0,
+      start: 0,
+      end: 0,
+      processedBlob: null,
+      ffmpeg: null
+    };
+
+    const sourceVideo = document.getElementById('sourceVideo');
+    const videoInput = document.getElementById('videoInput');
+    const fileMeta = document.getElementById('fileMeta');
+    const statusEl = document.getElementById('status');
+    const progressTrack = document.getElementById('progressTrack');
+    const progressBar = document.getElementById('progressBar');
+    const durationLabel = document.getElementById('durationLabel');
+    const startRange = document.getElementById('startRange');
+    const endRange = document.getElementById('endRange');
+    const startInput = document.getElementById('startInput');
+    const endInput = document.getElementById('endInput');
+    const startValue = document.getElementById('startValue');
+    const endValue = document.getElementById('endValue');
+    const setStartBtn = document.getElementById('setStartBtn');
+    const previewBtn = document.getElementById('previewBtn');
+    const processBtn = document.getElementById('processBtn');
+    const outputPanel = document.getElementById('outputPanel');
+    const outputVideo = document.getElementById('outputVideo');
+    const shareBtn = document.getElementById('shareBtn');
+    const downloadLink = document.getElementById('downloadLink');
+
+    function setStatus(message, tone = '') {
+      statusEl.textContent = message;
+      statusEl.classList.remove('error', 'success');
+      if (tone) statusEl.classList.add(tone);
+    }
+
+    function setProgress(percentage) {
+      progressTrack.style.display = 'block';
+      progressBar.style.width = `${Math.max(0, Math.min(100, percentage))}%`;
+    }
+
+    function formatTime(value) {
+      const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+      const mins = Math.floor(safeValue / 60);
+      const secs = safeValue - (mins * 60);
+      return `${String(mins).padStart(2, '0')}:${secs.toFixed(1).padStart(4, '0')}`;
+    }
+
+    function parseTime(value) {
+      if (!value || value === '') return 0;
+      const text = String(value).trim();
+      if (text.includes(':')) {
+        const parts = text.split(':').map(part => Number(part));
+        if (parts.length === 2) {
+          return (parts[0] * 60) + parts[1];
+        }
+        if (parts.length === 3) {
+          return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+        }
+      }
+      const numeric = Number(text);
+      return Number.isFinite(numeric) ? numeric : 0;
+    }
+
+    function updateTimeLabels() {
+      startRange.value = String(state.start);
+      endRange.value = String(state.end);
+      startInput.value = formatTime(state.start).replace('.0', '');
+      endInput.value = formatTime(state.end).replace('.0', '');
+      startValue.textContent = formatTime(state.start).replace('.0', '');
+      endValue.textContent = formatTime(state.end).replace('.0', '');
+      durationLabel.textContent = formatTime(state.duration).replace('.0', '');
+      startRange.max = String(state.duration);
+      endRange.max = String(state.duration);
+    }
+
+    function clampRangeValues() {
+      if (!state.duration) return;
+      state.start = Math.min(Math.max(state.start, 0), state.duration);
+      state.end = Math.min(Math.max(state.end, 0), state.duration);
+      if (state.end < state.start) {
+        state.end = state.start;
+      }
+      updateTimeLabels();
+    }
+
+    function syncInputsFromStart() {
+      state.start = parseTime(startInput.value);
+      if (state.start > state.duration) state.start = state.duration;
+      state.end = Math.max(state.end, state.start);
+      if (state.end > state.duration) state.end = state.duration;
+      clampRangeValues();
+    }
+
+    function syncInputsFromEnd() {
+      state.end = parseTime(endInput.value);
+      if (state.end > state.duration) state.end = state.duration;
+      if (state.end < state.start) state.end = state.start;
+      clampRangeValues();
+    }
+
+    function updateFileMeta() {
+      if (!state.file) {
+        fileMeta.textContent = 'No video selected yet.';
+        return;
+      }
+      fileMeta.textContent = `${state.name} • ${formatTime(state.duration).replace('.0', '')} • Local file only`;
+    }
+
+    function attachSourceVideoEvents() {
+      sourceVideo.addEventListener('loadedmetadata', () => {
+        state.duration = Number.isFinite(sourceVideo.duration) ? sourceVideo.duration : 0;
+        state.start = 0;
+        state.end = state.duration;
+        startRange.max = String(state.duration);
+        endRange.max = String(state.duration);
+        updateTimeLabels();
+        updateFileMeta();
+      });
+
+      sourceVideo.addEventListener('timeupdate', () => {
+        if (sourceVideo.currentTime >= state.end && state.end > state.start) {
+          sourceVideo.pause();
+          sourceVideo.currentTime = state.start;
+        }
+      });
+    }
+
+    async function loadFFmpeg() {
+      if (state.ffmpeg) return state.ffmpeg;
+
+      const [{ FFmpeg }, { fetchFile, toBlobURL }] = await Promise.all([
+        import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js'),
+        import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js')
+      ]);
+
+      const ffmpeg = new FFmpeg();
+      const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+      ffmpeg.on('log', ({ message }) => {
+        if (message.includes('time=')) {
+          const match = message.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+          if (match) {
+            const totalSeconds = (Number(match[1]) * 3600) + (Number(match[2]) * 60) + Number(match[3]);
+            const progress = Math.min(100, (totalSeconds / Math.max(state.duration, 1)) * 100);
+            setProgress(progress);
+          }
+        }
+      });
+
+      await ffmpeg.load({
+        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+      });
+
+      state.ffmpeg = ffmpeg;
+      return ffmpeg;
+    }
+
+    function getExportFilter(mode, width, height) {
+      switch (mode) {
+        case 'original':
+          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
+        case 'vertical-blur':
+          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,boxblur=8:1,format=yuv420p`;
+        case 'center-crop':
+          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,crop=${width}:${height}`;
+        case 'classic-vertical':
+          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+        default:
+          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
+      }
+    }
+
+    function getSelectedResolution() {
+      const value = document.getElementById('resolutionSelect').value;
+      const [width, height] = value.split('x').map(Number);
+      return { width, height };
+    }
+
+    function getSelectedExportStyle() {
+      const checked = document.querySelector('input[name="exportStyle"]:checked');
+      return checked ? checked.value : 'original';
+    }
+
+    async function processClip() {
+      if (!state.file) {
+        setStatus('Choose a local video before processing.', 'error');
+        return;
+      }
+
+      const clipDuration = Math.max(0.5, state.end - state.start);
+      if (clipDuration <= 0) {
+        setStatus('Select a valid clip length greater than zero.', 'error');
+        return;
+      }
+
+      processBtn.disabled = true;
+      setStatus('Preparing FFmpeg.wasm and processing clip...', '');
+      setProgress(5);
+
+      try {
+        const ffmpeg = await loadFFmpeg();
+        const { width, height } = getSelectedResolution();
+        const exportMode = getSelectedExportStyle();
+        const inputName = `input-${Date.now()}${state.name.includes('.') ? state.name.slice(state.name.lastIndexOf('.')) : '.mp4'}`;
+        const outputName = `clips4u-mobile-clip-${Date.now()}.mp4`;
+        const clipFilter = getExportFilter(exportMode, width, height);
+
+        const { fetchFile } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
+        await ffmpeg.writeFile(inputName, await fetchFile(state.file));
+
+        const parts = [
+          '-ss', String(state.start),
+          '-t', String(clipDuration),
+          '-i', inputName,
+          '-vf', clipFilter,
+          '-c:v', 'libx264',
+          '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac',
+          '-movflags', '+faststart',
+          outputName
+        ];
+
+        await ffmpeg.exec(parts);
+
+        const data = await ffmpeg.readFile(outputName);
+        const blob = new Blob([data.buffer], { type: 'video/mp4' });
+        const url = URL.createObjectURL(blob);
+
+        state.processedBlob = blob;
+        outputVideo.src = url;
+        outputVideo.load();
+        outputPanel.classList.add('visible');
+        downloadLink.href = url;
+        downloadLink.download = outputName;
+        setStatus('Finished. Your local clip is ready to share or download.', 'success');
+        setProgress(100);
+      } catch (error) {
+        console.error(error);
+        setStatus('Processing failed. Try a shorter clip or another file format.', 'error');
+      } finally {
+        processBtn.disabled = false;
+      }
+    }
+
+    function handleFileSelection(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      if (!file.type.startsWith('video/')) {
+        setStatus('Please choose a valid video file.', 'error');
+        return;
+      }
+
+      state.file = file;
+      state.name = file.name;
+      sourceVideo.src = URL.createObjectURL(file);
+      sourceVideo.load();
+      outputPanel.classList.remove('visible');
+      outputVideo.removeAttribute('src');
+      progressTrack.style.display = 'none';
+      progressBar.style.width = '0%';
+      setStatus('Video selected. Adjust the start and end points, then process your clip.', '');
+    }
+
+    function setClipStartToCurrent() {
+      if (!state.file) {
+        setStatus('Choose a video first.', 'error');
+        return;
+      }
+      state.start = Math.min(sourceVideo.currentTime || 0, state.duration || 0);
+      state.end = Math.max(state.end, state.start);
+      clampRangeValues();
+      setStatus(`Clip start set to ${formatTime(state.start).replace('.0', '')}.`, '');
+    }
+
+    function applyQuickClip(lengthSeconds) {
+      if (!state.file) {
+        setStatus('Choose a video first.', 'error');
+        return;
+      }
+      const safeLength = Number(lengthSeconds);
+      state.start = Math.min(Math.max(sourceVideo.currentTime || 0, 0), state.duration || 0);
+      state.end = Math.min(state.duration, state.start + safeLength);
+      clampRangeValues();
+      setStatus(`Clip set to ${safeLength}s from ${formatTime(state.start).replace('.0', '')}.`, '');
+    }
+
+    function previewSelectedClip() {
+      if (!state.file) {
+        setStatus('Choose a video before previewing.', 'error');
+        return;
+      }
+      const clipLength = Math.max(0.1, state.end - state.start);
+      if (clipLength <= 0) {
+        setStatus('Choose a valid start and end time.', 'error');
+        return;
+      }
+      sourceVideo.currentTime = state.start;
+      sourceVideo.play();
+      setStatus(`Previewing clip from ${formatTime(state.start).replace('.0', '')} to ${formatTime(state.end).replace('.0', '')}.`, '');
+    }
+
+    async function shareProcessedVideo() {
+      if (!state.processedBlob) {
+        setStatus('Create a processed clip before sharing.', 'error');
+        return;
+      }
+
+      try {
+        if (navigator.share) {
+          const file = new File([state.processedBlob], 'clips4u-mobile-clip.mp4', { type: 'video/mp4' });
+          await navigator.share({
+            title: 'Clips4U clip',
+            text: 'Saved from Clips4U Mobile Video Clipper',
+            files: [file]
+          });
+          setStatus('Share sheet opened. On iPhone, choose Save Video to save it to Photos.', 'success');
+          return;
+        }
+        const url = URL.createObjectURL(state.processedBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'clips4u-mobile-clip.mp4';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setStatus('Download started. If your browser does not support direct sharing, use the download option.', 'success');
+      } catch (error) {
+        if (error && error.name === 'AbortError') {
+          setStatus('Share cancelled.', '');
+        } else {
+          console.error(error);
+          setStatus('Sharing is unavailable here. Use Download MP4 instead.', 'error');
+        }
+      }
+    }
+
+    videoInput.addEventListener('change', handleFileSelection);
+    startRange.addEventListener('input', () => {
+      state.start = Number(startRange.value);
+      if (state.start > state.end) state.end = state.start;
+      updateTimeLabels();
+    });
+    endRange.addEventListener('input', () => {
+      state.end = Number(endRange.value);
+      if (state.end < state.start) state.start = state.end;
+      updateTimeLabels();
+    });
+    startInput.addEventListener('change', syncInputsFromStart);
+    endInput.addEventListener('change', syncInputsFromEnd);
+    setStartBtn.addEventListener('click', setClipStartToCurrent);
+    previewBtn.addEventListener('click', previewSelectedClip);
+    processBtn.addEventListener('click', processClip);
+    shareBtn.addEventListener('click', shareProcessedVideo);
+    document.querySelectorAll('[data-length]').forEach((button) => {
+      button.addEventListener('click', () => applyQuickClip(button.dataset.length));
+    });
+
+    attachSourceVideoEvents();
+    updateTimeLabels();
+    setStatus('Select a local video to begin.');
+  </script>
+</body>
+</html>
