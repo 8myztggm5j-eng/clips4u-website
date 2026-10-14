@@ -610,7 +610,7 @@
       sourceVideo.addEventListener('loadedmetadata', () => {
         state.duration = Number.isFinite(sourceVideo.duration) ? sourceVideo.duration : 0;
         state.start = 0;
-        state.end = state.duration;
+        state.end = Math.min(state.duration, 30);
         startRange.max = String(state.duration);
         endRange.max = String(state.duration);
         updateTimeLabels();
@@ -621,14 +621,6 @@
         if (sourceVideo.currentTime >= state.end && state.end > state.start) {
           sourceVideo.pause();
           sourceVideo.currentTime = state.start;
-        }
-      });
-
-      sourceVideo.addEventListener('emptied', () => {
-        // When source is cleared, release any object URL
-        if (state.sourceObjectUrl) {
-          try { URL.revokeObjectURL(state.sourceObjectUrl); } catch (e) {}
-          state.sourceObjectUrl = null;
         }
       });
     }
@@ -669,10 +661,11 @@
     function getExportFilter(mode, width, height) {
       // Returns an object describing whether to use filter_complex and the filter string
       if (mode === 'vertical-blur') {
-        // full-screen blurred background (increase -> crop), centered unblurred foreground (decrease)
-        const filter = `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},boxblur=8:1,setsar=1[bg];` +
-                       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1[fg];` +
-                       `[bg][fg]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2[outv]`;
+        const filter =
+          `[0:v]split=2[bgsrc][fgsrc];` +
+          `[bgsrc]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},boxblur=8:1,setsar=1[bg];` +
+          `[fgsrc]scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1[fg];` +
+          `[bg][fg]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2[outv]`;
         return { useFilterComplex: true, filter };
       }
 
@@ -710,11 +703,13 @@
         return;
       }
 
-      const clipDuration = Math.max(0.5, state.end - state.start);
-      if (clipDuration <= 0) {
+      // validate using rawClipDuration then ensure minimum
+      const rawClipDuration = state.end - state.start;
+      if (rawClipDuration <= 0) {
         setStatus('Select a valid clip length greater than zero.', 'error');
         return;
       }
+      const clipDuration = Math.max(0.5, rawClipDuration);
 
       // Single processing guard
       processBtn.disabled = true;
@@ -771,6 +766,14 @@
 
         const data = await ffmpeg.readFile(outputName);
         const blob = new Blob([data.buffer], { type: 'video/mp4' });
+
+        // delete temp files to free FS space in ffmpeg.wasm
+        try {
+          await ffmpeg.deleteFile(inputName);
+        } catch (e) {}
+        try {
+          await ffmpeg.deleteFile(outputName);
+        } catch (e) {}
 
         // cleanup previous output URL to reduce memory pressure
         if (state.outputObjectUrl) {
@@ -838,8 +841,12 @@
       sourceVideo.src = objUrl;
       sourceVideo.load();
 
-      outputPanel.classList.remove('visible');
+      // Reset previous output and processed blob
+      state.processedBlob = null;
       outputVideo.removeAttribute('src');
+      try { outputVideo.load(); } catch (e) {}
+      outputPanel.classList.remove('visible');
+
       progressTrack.style.display = 'none';
       progressBar.style.width = '0%';
     }
