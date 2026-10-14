@@ -401,7 +401,7 @@
         <div id="fileMeta" class="meta">No video selected yet.</div>
 
         <div class="video-wrap">
-          <video id="sourceVideo" playsinline controls preload="metadata"></video>
+          <video id="sourceVideo" playsinline webkit-playsinline controls preload="metadata"></video>
         </div>
       </section>
 
@@ -478,7 +478,7 @@
       <section id="outputPanel" class="panel output-panel">
         <h2 style="margin-top:0; margin-bottom:10px;">Finished clip</h2>
         <div class="video-wrap">
-          <video id="outputVideo" playsinline controls preload="metadata"></video>
+          <video id="outputVideo" playsinline webkit-playsinline controls preload="metadata"></video>
         </div>
 
         <div class="share-row">
@@ -499,7 +499,10 @@
       start: 0,
       end: 0,
       processedBlob: null,
-      ffmpeg: null
+      ffmpeg: null,
+      sourceObjectUrl: null,
+      outputObjectUrl: null,
+      processingClipDuration: 0
     };
 
     const sourceVideo = document.getElementById('sourceVideo');
@@ -599,7 +602,8 @@
         fileMeta.textContent = 'No video selected yet.';
         return;
       }
-      fileMeta.textContent = `${state.name} • ${formatTime(state.duration).replace('.0', '')} • Local file only`;
+      const durText = state.duration ? formatTime(state.duration).replace('.0', '') : 'Loading video metadata...';
+      fileMeta.textContent = `${state.name} • ${durText} • Local file only`;
     }
 
     function attachSourceVideoEvents() {
@@ -619,6 +623,14 @@
           sourceVideo.currentTime = state.start;
         }
       });
+
+      sourceVideo.addEventListener('emptied', () => {
+        // When source is cleared, release any object URL
+        if (state.sourceObjectUrl) {
+          try { URL.revokeObjectURL(state.sourceObjectUrl); } catch (e) {}
+          state.sourceObjectUrl = null;
+        }
+      });
     }
 
     async function loadFFmpeg() {
@@ -631,12 +643,15 @@
 
       const ffmpeg = new FFmpeg();
       const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+
       ffmpeg.on('log', ({ message }) => {
+        // Parse time=hh:mm:ss.xx from ffmpeg log and calculate progress relative to clip duration
         if (message.includes('time=')) {
           const match = message.match(/time=(\d+):(\d+):(\d+\.\d+)/);
           if (match) {
             const totalSeconds = (Number(match[1]) * 3600) + (Number(match[2]) * 60) + Number(match[3]);
-            const progress = Math.min(100, (totalSeconds / Math.max(state.duration, 1)) * 100);
+            const clipSeconds = state.processingClipDuration && state.processingClipDuration > 0 ? state.processingClipDuration : state.duration || 1;
+            const progress = Math.min(100, (totalSeconds / Math.max(clipSeconds, 1)) * 100);
             setProgress(progress);
           }
         }
@@ -652,18 +667,30 @@
     }
 
     function getExportFilter(mode, width, height) {
-      switch (mode) {
-        case 'original':
-          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
-        case 'vertical-blur':
-          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,boxblur=8:1,format=yuv420p`;
-        case 'center-crop':
-          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,crop=${width}:${height}`;
-        case 'classic-vertical':
-          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
-        default:
-          return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
+      // Returns an object describing whether to use filter_complex and the filter string
+      if (mode === 'vertical-blur') {
+        // full-screen blurred background (increase -> crop), centered unblurred foreground (decrease)
+        const filter = `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},boxblur=8:1,setsar=1[bg];` +
+                       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1[fg];` +
+                       `[bg][fg]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2[outv]`;
+        return { useFilterComplex: true, filter };
       }
+
+      if (mode === 'center-crop') {
+        // increase before crop to ensure center crop fills target
+        const filter = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1,format=yuv420p`;
+        return { useFilterComplex: false, filter };
+      }
+
+      if (mode === 'classic-vertical') {
+        // fit inside then pad to exact frame
+        const filter = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p`;
+        return { useFilterComplex: false, filter };
+      }
+
+      // original: preserve source aspect as closely as possible; scale down to fit within selected resolution without padding
+      const filter = `scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=yuv420p`;
+      return { useFilterComplex: false, filter };
     }
 
     function getSelectedResolution() {
@@ -689,38 +716,70 @@
         return;
       }
 
+      // Single processing guard
       processBtn.disabled = true;
       setStatus('Preparing FFmpeg.wasm and processing clip...', '');
       setProgress(5);
 
       try {
+        // set processing duration for progress calculations
+        state.processingClipDuration = clipDuration;
+
         const ffmpeg = await loadFFmpeg();
         const { width, height } = getSelectedResolution();
         const exportMode = getSelectedExportStyle();
         const inputName = `input-${Date.now()}${state.name.includes('.') ? state.name.slice(state.name.lastIndexOf('.')) : '.mp4'}`;
         const outputName = `clips4u-mobile-clip-${Date.now()}.mp4`;
-        const clipFilter = getExportFilter(exportMode, width, height);
 
         const { fetchFile } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
         await ffmpeg.writeFile(inputName, await fetchFile(state.file));
 
-        const parts = [
-          '-ss', String(state.start),
-          '-t', String(clipDuration),
-          '-i', inputName,
-          '-vf', clipFilter,
-          '-c:v', 'libx264',
-          '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac',
-          '-movflags', '+faststart',
-          outputName
-        ];
+        const { useFilterComplex, filter } = getExportFilter(exportMode, width, height);
+        let parts;
+
+        if (useFilterComplex) {
+          // use filter_complex and map video/audio explicitly
+          parts = [
+            '-ss', String(state.start),
+            '-t', String(clipDuration),
+            '-i', inputName,
+            '-filter_complex', filter,
+            '-map', '[outv]',
+            '-map', '0:a?',
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
+            '-movflags', '+faststart',
+            outputName
+          ];
+        } else {
+          // simple -vf chain
+          parts = [
+            '-ss', String(state.start),
+            '-t', String(clipDuration),
+            '-i', inputName,
+            '-vf', filter,
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
+            '-movflags', '+faststart',
+            outputName
+          ];
+        }
 
         await ffmpeg.exec(parts);
 
         const data = await ffmpeg.readFile(outputName);
         const blob = new Blob([data.buffer], { type: 'video/mp4' });
+
+        // cleanup previous output URL to reduce memory pressure
+        if (state.outputObjectUrl) {
+          try { URL.revokeObjectURL(state.outputObjectUrl); } catch (e) {}
+          state.outputObjectUrl = null;
+        }
+
         const url = URL.createObjectURL(blob);
+        state.outputObjectUrl = url;
 
         state.processedBlob = blob;
         outputVideo.src = url;
@@ -735,26 +794,54 @@
         setStatus('Processing failed. Try a shorter clip or another file format.', 'error');
       } finally {
         processBtn.disabled = false;
+        // clear processing duration
+        state.processingClipDuration = 0;
       }
+    }
+
+    function looksLikeVideoFile(file) {
+      if (!file) return false;
+      if (file.type && file.type.startsWith('video/')) return true;
+      const name = (file.name || '').toLowerCase();
+      return (name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.m4v') || name.endsWith('.webm') || name.endsWith('.mkv'));
     }
 
     function handleFileSelection(event) {
       const file = event.target.files && event.target.files[0];
       if (!file) return;
-      if (!file.type.startsWith('video/')) {
-        setStatus('Please choose a valid video file.', 'error');
+
+      if (!looksLikeVideoFile(file)) {
+        setStatus('Please choose a valid video file (mp4, mov, m4v, webm, mkv).', 'error');
         return;
       }
 
+      // Clean up previous source URL to reduce memory
+      if (state.sourceObjectUrl) {
+        try { URL.revokeObjectURL(state.sourceObjectUrl); } catch (e) {}
+        state.sourceObjectUrl = null;
+      }
+      if (state.outputObjectUrl) {
+        try { URL.revokeObjectURL(state.outputObjectUrl); } catch (e) {}
+        state.outputObjectUrl = null;
+      }
+
       state.file = file;
-      state.name = file.name;
-      sourceVideo.src = URL.createObjectURL(file);
+      state.name = file.name || 'video';
+      state.duration = 0; // unknown until metadata loads
+
+      // Immediately update meta area so user sees chosen filename
+      fileMeta.textContent = `${state.name} • Loading video metadata... • Local file only`;
+      setStatus('Video selected — loading metadata...', '');
+
+      const objUrl = URL.createObjectURL(file);
+      state.sourceObjectUrl = objUrl;
+      sourceVideo.src = objUrl;
       sourceVideo.load();
+
       outputPanel.classList.remove('visible');
       outputVideo.removeAttribute('src');
       progressTrack.style.display = 'none';
       progressBar.style.width = '0%';
-      setStatus('Video selected. Adjust the start and end points, then process your clip.', '');
     }
 
     function setClipStartToCurrent() {
@@ -802,23 +889,41 @@
       }
 
       try {
+        const file = new File([state.processedBlob], 'clips4u-mobile-clip.mp4', { type: 'video/mp4' });
         if (navigator.share) {
-          const file = new File([state.processedBlob], 'clips4u-mobile-clip.mp4', { type: 'video/mp4' });
+          // verify canShare when available
+          if (navigator.canShare && !navigator.canShare({ files: [file] })) {
+            // fallback to download
+            const url = URL.createObjectURL(state.processedBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = file.name;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            try { URL.revokeObjectURL(url); } catch (e) {}
+            setStatus('Your device cannot share files directly — download started instead.', 'success');
+            return;
+          }
+
           await navigator.share({
             title: 'Clips4U clip',
             text: 'Saved from Clips4U Mobile Video Clipper',
             files: [file]
           });
+
           setStatus('Share sheet opened. On iPhone, choose Save Video to save it to Photos.', 'success');
           return;
         }
+
         const url = URL.createObjectURL(state.processedBlob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'clips4u-mobile-clip.mp4';
+        a.download = file.name;
         document.body.appendChild(a);
         a.click();
         a.remove();
+        try { URL.revokeObjectURL(url); } catch (e) {}
         setStatus('Download started. If your browser does not support direct sharing, use the download option.', 'success');
       } catch (error) {
         if (error && error.name === 'AbortError') {
@@ -830,6 +935,7 @@
       }
     }
 
+    // Event wiring
     videoInput.addEventListener('change', handleFileSelection);
     startRange.addEventListener('input', () => {
       state.start = Number(startRange.value);
@@ -854,6 +960,18 @@
     attachSourceVideoEvents();
     updateTimeLabels();
     setStatus('Select a local video to begin.');
+
+    // Clean up object URLs on page unload
+    window.addEventListener('beforeunload', () => {
+      if (state.sourceObjectUrl) {
+        try { URL.revokeObjectURL(state.sourceObjectUrl); } catch (e) {}
+        state.sourceObjectUrl = null;
+      }
+      if (state.outputObjectUrl) {
+        try { URL.revokeObjectURL(state.outputObjectUrl); } catch (e) {}
+        state.outputObjectUrl = null;
+      }
+    });
   </script>
 </body>
 </html>
