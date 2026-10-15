@@ -635,39 +635,55 @@
     async function loadFFmpeg() {
       if (state.ffmpeg) return state.ffmpeg;
 
+      setStatus('Loading the video engine for iPhone Safari (about 30 MB)...');
+
+      // Both the ESM worker and its core MUST use the matching ESM build.
+      // The previous UMD core cannot be imported correctly by this module worker.
+      const version = '0.12.10';
+      const workerURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@' + version + '/dist/esm/worker.js';
+      const coreBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@' + version + '/dist/esm';
+
       const [{ FFmpeg }, { toBlobURL }] = await Promise.all([
         import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js'),
         import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js')
       ]);
 
-      const ffmpeg = new FFmpeg();
-      const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
-      // A same-origin bootstrap lets Safari create the module worker.
-      const workerCode = 'import "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js";';
-      const workerURL = URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' }));
-      state.workerObjectUrl = workerURL;
+      // The worker is created from a same-origin Blob, which imports the CDN module.
+      // Use an absolute URL so relative imports inside the worker resolve correctly.
+      const workerCode = 'import "' + workerURL + '";';
+      const classWorkerURL = URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' }));
+      if (state.workerObjectUrl) URL.revokeObjectURL(state.workerObjectUrl);
+      state.workerObjectUrl = classWorkerURL;
 
+      const ffmpeg = new FFmpeg();
       ffmpeg.on('log', ({ message }) => {
-        // Parse time=hh:mm:ss.xx from ffmpeg log and calculate progress relative to clip duration
-        if (message.includes('time=')) {
-          const match = message.match(/time=(\d+):(\d+):(\d+\.\d+)/);
-          if (match) {
-            const totalSeconds = (Number(match[1]) * 3600) + (Number(match[2]) * 60) + Number(match[3]);
-            const clipSeconds = state.processingClipDuration && state.processingClipDuration > 0 ? state.processingClipDuration : state.duration || 1;
-            const progress = Math.min(100, (totalSeconds / Math.max(clipSeconds, 1)) * 100);
-            setProgress(progress);
-          }
+        const match = message.match(/time=(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)/);
+        if (match && state.processingClipDuration > 0) {
+          const elapsed = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+          setProgress(Math.min(95, (elapsed / state.processingClipDuration) * 95));
         }
       });
 
-      await ffmpeg.load({
-        classWorkerURL: workerURL,
-        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
-      });
-
-      state.ffmpeg = ffmpeg;
-      return ffmpeg;
+      // Loading the WASM binary from a Blob avoids cross-origin WASM fetch issues.
+      const wasmURL = await toBlobURL(coreBase + '/ffmpeg-core.wasm', 'application/wasm');
+      try {
+        // Import the ESM core directly over HTTPS: avoids dynamic blob-module
+        // import failures seen on some iPhone Safari versions.
+        await ffmpeg.load({
+          classWorkerURL,
+          coreURL: coreBase + '/ffmpeg-core.js',
+          wasmURL
+        });
+        state.ffmpeg = ffmpeg;
+        return ffmpeg;
+      } catch (err) {
+        try { ffmpeg.terminate(); } catch (e) {}
+        console.error('Clips4U FFmpeg ESM load failed', err);
+        throw new Error('Could not load the iPhone video engine (' + (err?.message || String(err)) + '). Check connection or try again.');
+      } finally {
+        // The engine takes a reference to the WASM URL after loading.
+        // Do not revoke wasmURL until the engine is no longer needed.
+      }
     }
 
     function getExportFilter(mode, width, height) {
