@@ -4,6 +4,7 @@ they are not predictions of reach or evidence of copyright permission.
 """
 from __future__ import annotations
 
+import gc
 import hmac
 import logging
 import os
@@ -27,6 +28,7 @@ MAX_SECONDS = 600
 JOBS: dict[str, dict] = {}
 ACTIVE_JOB: str | None = None
 EXPIRE_SECONDS = 3600
+OUTPUT_SIZES = {"540p": (540, 960), "1080p": (1080, 1920), "4k": (2160, 3840)}
 HOOKS = ("wait", "watch", "listen", "look", "imagine", "what if", "why", "how",
          "the reason", "the truth", "here's", "you won't", "did you know", "actually",
          "this is", "never", "first time", "the moment", "secret", "turns out")
@@ -193,42 +195,60 @@ def write_caption_file(words: list[dict], start: float, end: float, target: Path
 
 
 def render_vertical_mp4(source_path: str, target: Path, start: float, end: float,
-                        subtitle_path: Path | None) -> None:
-    """Render iPhone-friendly vertical MP4; optionally burn in synchronized speech captions."""
+                        subtitle_path: Path | None, output_quality: str = "540p") -> None:
+    """Render a standard/HD/4K vertical MP4 from the original video, not the 540p preview.
+
+    4K is a resolution upscale using Lanczos resampling, not AI super-resolution.
+    Keep x264 at one thread in 4K mode to lower memory use on Render.
+    """
     seconds = round(end - start, 2)
     if not 0 < seconds <= 61:
         raise ValueError("Invalid highlight timestamps")
+    if output_quality not in OUTPUT_SIZES:
+        raise ValueError("Unsupported output quality")
+    width, height = OUTPUT_SIZES[output_quality]
     filters = [
-        "scale=540:960:force_original_aspect_ratio=increase",
-        "crop=540:960", "setsar=1", "fps=24"
+        f"scale={width}:{height}:flags=lanczos:force_original_aspect_ratio=increase",
+        f"crop={width}:{height}", "setsar=1", "fps=24"
     ]
+    if output_quality == "4k":
+        # Gentle sharpening after upscaling; cannot restore lost detail.
+        filters.append("unsharp=5:5:0.35:5:5:0.0")
     if subtitle_path:
-        # Paths are generated in a trusted temporary folder, never provided by users.
-        style = "FontName=DejaVu Sans,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=130"
+        factor = width / 540
+        style = (
+            f"FontName=DejaVu Sans,FontSize={round(19 * factor)},"
+            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,"
+            f"BorderStyle=1,Outline={round(3 * factor)},Shadow={round(factor)},"
+            f"Alignment=2,MarginV={round(130 * factor)}"
+        )
         filters.append(f"subtitles=filename='{subtitle_path}':force_style='{style}'")
+    is_4k = output_quality == "4k"
     try:
         result = subprocess.run([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-y", "-ss", str(start), "-i", source_path, "-t", str(seconds),
-            "-map", "0:v:0", "-map", "0:a:0?",
+            "-filter_threads", "1", "-y", "-ss", str(start), "-i", source_path,
+            "-t", str(seconds), "-map", "0:v:0", "-map", "0:a:0?",
             "-vf", ",".join(filters),
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-            "-threads", "2", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-tune", "zerolatency", "-crf", "31" if is_4k else "28",
+            "-threads", "1" if is_4k else "2", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k",
             "-movflags", "+faststart", str(target)
-        ], capture_output=True, timeout=240)
+        ], capture_output=True, timeout=480 if is_4k else 240)
     except subprocess.TimeoutExpired as exc:
-        raise ValueError("Rendering took too long. Try fewer or shorter clips.") from exc
+        raise ValueError("4K took too long on the current server. Try 1080p or a shorter clip.") from exc
     if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
-        logger.warning("clip rendering failed stage=ffmpeg exit=%s captions=%s",
-                       result.returncode, bool(subtitle_path))
-        raise ValueError("Couldn't render a video. Try a shorter clip or switch captions off.")
+        logger.warning("clip rendering failed stage=ffmpeg exit=%s captions=%s quality=%s",
+                       result.returncode, bool(subtitle_path), output_quality)
+        raise ValueError("Video rendering failed. 4K needs more memory and CPU than Render may provide; try 1080p or 540p.")
     if target.stat().st_size > MAX_BYTES:
-        raise ValueError("A rendered clip exceeded the size limit.")
+        raise ValueError("The rendered clip exceeded 90 MB. Choose a lower quality or shorter length.")
 
 
 def analyze(job_id: str, folder: str, source_path: str,
-            clip_count: int, clip_length: int, captions: bool) -> None:
+            clip_count: int, clip_length: int, captions: bool,
+            output_quality: str = "540p") -> None:
     global ACTIVE_JOB
     job = JOBS[job_id]
     try:
@@ -260,6 +280,10 @@ def analyze(job_id: str, folder: str, source_path: str,
         job.update(stage="Ranking speech highlights", updated=time.time())
         if len(words) < 6:
             raise ValueError("Not enough recognizable speech to find meaningful highlights.")
+        language = info.language
+        # Release the speech model before 4K FFmpeg work on a memory-limited host.
+        del segments, info, model
+        gc.collect()
         highlights = rank_moments(words, duration, clip_length, clip_count)
         if not highlights:
             raise ValueError("No suitable spoken highlights were found at that length. Try shorter clips or a speech-heavy video.")
@@ -267,7 +291,7 @@ def analyze(job_id: str, folder: str, source_path: str,
         # interaction or on-device FFmpeg is required to produce the three clips.
         clips = []
         for i, highlight in enumerate(highlights, start=1):
-            job.update(stage=f"Rendering video {i} of {len(highlights)}", updated=time.time())
+            job.update(stage=f"Rendering {output_quality.upper()} video {i} of {len(highlights)}", updated=time.time())
             output_path = Path(folder) / f"clip_{i}.mp4"
             subtitle_path = None
             if captions:
@@ -276,11 +300,14 @@ def analyze(job_id: str, folder: str, source_path: str,
                     subtitle_path = candidate
                 else:
                     raise ValueError("No recognizable words to caption. Try again with captions turned off.")
-            render_vertical_mp4(source_path, output_path, highlight["start"], highlight["end"], subtitle_path)
+            render_vertical_mp4(source_path, output_path, highlight["start"], highlight["end"],
+                                subtitle_path, output_quality)
             if subtitle_path:
                 subtitle_path.unlink(missing_ok=True)
             clips.append({"rank": i, "filename": f"clips4u-highlight-{i}.mp4",
-                          "bytes": output_path.stat().st_size, "captions": captions})
+                          "bytes": output_path.stat().st_size, "captions": captions,
+                          "width": OUTPUT_SIZES[output_quality][0],
+                          "height": OUTPUT_SIZES[output_quality][1]})
         # Retain only the short finished clips temporarily; discard source/audio
         # before notifying the iPhone that all exports are available.
         Path(source_path).unlink(missing_ok=True)
@@ -293,9 +320,12 @@ def analyze(job_id: str, folder: str, source_path: str,
             "requested_count": clip_count,
             "clip_length_seconds": clip_length,
             "captions": captions,
-            "language": info.language,
+            "output_quality": output_quality,
+            "width": OUTPUT_SIZES[output_quality][0],
+            "height": OUTPUT_SIZES[output_quality][1],
+            "language": language,
             "method": "faster-whisper transcription + speech-content scoring",
-            "note": "Videos are 9:16 MP4s selected using speech. Some moments can overlap when there are few distinct highlights."
+            "note": "Videos are 9:16 MP4s selected using speech. 4K is resolution upscaling (not AI detail restoration). Some moments can overlap."
         }, updated=time.time())
         # Clear temporary exported files even if no more API requests arrive.
         expiration = Timer(EXPIRE_SECONDS + 60, cleanup_jobs)
@@ -322,6 +352,7 @@ async def start_highlights(
     clip_count: int = Form(3),
     clip_length: int = Form(30),
     captions: bool = Form(True),
+    output_quality: str = Form("540p"),
     x_clips4u_key: str | None = Header(default=None),
 ):
     global ACTIVE_JOB
@@ -332,6 +363,8 @@ async def start_highlights(
         raise HTTPException(400, "Choose between 1 and 5 clips")
     if clip_length not in (15, 20, 30, 45, 60):
         raise HTTPException(400, "Choose a clip length of 15, 20, 30, 45 or 60 seconds")
+    if output_quality not in OUTPUT_SIZES:
+        raise HTTPException(400, "Choose 540p, 1080p or 4k output quality")
     cleanup_jobs()
     if ACTIVE_JOB is not None:
         raise HTTPException(429, "Another highlight analysis is underway. Try again shortly.")
@@ -359,7 +392,7 @@ async def start_highlights(
     JOBS[job_id] = {"status": "queued", "stage": "Waiting to analyze", "updated": time.time()}
     ACTIVE_JOB = job_id
     background_tasks.add_task(analyze, job_id, folder, str(dest),
-                              clip_count, clip_length, captions)
+                              clip_count, clip_length, captions, output_quality)
     return {"job_id": job_id, "status": "queued"}
 
 
