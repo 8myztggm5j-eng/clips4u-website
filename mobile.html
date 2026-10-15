@@ -422,6 +422,21 @@
         <div class="info-note">Your local video picker still works without the backend. Cloud servers may be blocked from downloading some YouTube videos.</div>
       </section>
 
+      <section class="panel" id="aiHighlightsPanel">
+        <h2 style="margin:0 0 8px;">AI: Find the 3 strongest moments</h2>
+        <p class="lede">Use speech analysis to suggest three high-potential 15–60 second highlights. Works with a local video or a successfully imported YouTube video.</p>
+        <div class="control-box">
+          <label style="display:flex;align-items:flex-start;gap:10px;color:var(--muted);font-size:.9rem;margin-bottom:14px;">
+            <input type="checkbox" id="aiRights" style="width:20px;height:20px;flex:0 0 20px;accent-color:var(--blue);">
+            <span>I have permission to analyze this video and agree to send a temporary copy to my private Render backend. The backend deletes its copy after processing.</span>
+          </label>
+          <button class="button" id="aiAnalyzeBtn" type="button" style="width:100%;">Find 3 Best Moments</button>
+          <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. Uses the same backend URL and access key as YouTube import.</div>
+          <div id="aiResults" style="display:grid;gap:12px;margin-top:12px;"></div>
+        </div>
+        <div class="info-note">Faster-whisper identifies spoken content, not visual action or musical peaks. Scores are suggestions, not a guarantee of views. iPhone Safari may have difficulty processing large exports. YouTube's existing server-side bot check is unchanged.</div>
+      </section>
+
       <section class="panel">
         <div class="controls-grid">
           <div class="control-box">
@@ -1012,6 +1027,155 @@
         ytImportBtn.disabled = false;
         processBtn.disabled = false;
         videoInput.disabled = false;
+      }
+    });
+
+
+    // Analyze the same in-browser File object used by the clip editor. This also
+    // handles authorized YouTube imports after loadSelectedVideo(file) succeeds.
+    const aiAnalyzeBtn = document.getElementById('aiAnalyzeBtn');
+    const aiStatus = document.getElementById('aiStatus');
+    const aiResults = document.getElementById('aiResults');
+    const aiRights = document.getElementById('aiRights');
+    let latestAnalyzedFile = null;
+
+    function selectAiMoment(moment, shouldProcess = false, shouldPreview = false) {
+      if (!state.file || state.file !== latestAnalyzedFile) {
+        aiStatus.textContent = 'The video has changed. Analyze the current video first.';
+        return;
+      }
+      if (!state.duration || moment.start >= state.duration) {
+        aiStatus.textContent = 'The video duration is unavailable. Wait for it to load.';
+        return;
+      }
+      state.start = Math.max(0, Math.min(state.duration, moment.start));
+      state.end = Math.max(state.start, Math.min(state.duration, moment.end));
+      updateTimeLabels();
+      sourceVideo.currentTime = state.start;
+      setStatus('AI moment selected: ' + formatTime(state.start) + ' to ' + formatTime(state.end) +
+        '. You can fine-tune the timing or process the clip.', 'success');
+      if (shouldProcess) {
+        processClip();
+      } else if (shouldPreview) {
+        state.previewing = true;
+        sourceVideo.play().catch(() => setStatus('Tap Play in the video to preview this moment.', ''));
+        sourceVideo.scrollIntoView({behavior:'smooth', block:'center'});
+      } else {
+        startRange.scrollIntoView({behavior:'smooth', block:'center'});
+      }
+    }
+
+    function addAiMomentCard(moment) {
+      const card = document.createElement('div');
+      card.className = 'control-box';
+      const heading = document.createElement('div');
+      heading.style.cssText = 'font-weight:800;margin-bottom:6px;color:var(--gold);';
+      heading.textContent = '#' + moment.rank + ' · Highlight score ' + moment.score + '/100';
+      const time = document.createElement('div');
+      time.style.cssText = 'font-weight:700;margin-bottom:7px;';
+      time.textContent = formatTime(moment.start).replace('.0','') + ' – ' + formatTime(moment.end).replace('.0','');
+      const why = document.createElement('div');
+      why.style.cssText = 'color:var(--muted);font-size:.88rem;margin-bottom:8px;';
+      why.textContent = moment.reason || 'Speech-based suggestion';
+      const transcript = document.createElement('p');
+      transcript.style.cssText = 'color:var(--text);font-size:.92rem;line-height:1.5;margin:0 0 12px;';
+      transcript.textContent = '“' + (moment.transcript || 'No transcript snippet') + '”';
+      const actions = document.createElement('div');
+      actions.className = 'inline-actions';
+      actions.style.marginTop = '0';
+      const preview = document.createElement('button');
+      preview.type = 'button';
+      preview.className = 'secondary-button';
+      preview.textContent = 'Preview';
+      preview.addEventListener('click', () => selectAiMoment(moment, false, true));
+      const use = document.createElement('button');
+      use.type = 'button';
+      use.className = 'secondary-button';
+      use.textContent = 'Use this moment';
+      use.addEventListener('click', () => selectAiMoment(moment));
+      const render = document.createElement('button');
+      render.type = 'button';
+      render.className = 'button';
+      render.textContent = 'Process this clip';
+      render.addEventListener('click', () => selectAiMoment(moment, true));
+      actions.append(preview, use, render);
+      card.append(heading, time, why, transcript, actions);
+      aiResults.appendChild(card);
+    }
+
+    function aiResponseError(response, body) {
+      return (body && typeof body.detail === 'string') ? body.detail : 'Backend HTTP ' + response.status;
+    }
+
+    aiAnalyzeBtn.addEventListener('click', async () => {
+      if (state.importing || state.busy || aiAnalyzeBtn.disabled) return;
+      const file = state.file;
+      if (!file) {
+        aiStatus.textContent = 'Select a local video or successfully import a YouTube video first.';
+        return;
+      }
+      if (!aiRights.checked) {
+        aiStatus.textContent = 'Please confirm permission and consent to temporary backend processing.';
+        return;
+      }
+      if (file.size > 90 * 1024 * 1024) {
+        aiStatus.textContent = 'AI analysis supports source videos up to 90 MB.';
+        return;
+      }
+      const backendURL = ytServer.value.trim().replace(/\\/+$/, '');
+      const key = ytKey.value.trim();
+      try {
+        const url = new URL(backendURL);
+        if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/')
+          throw new Error('bad backend');
+      } catch (error) {
+        aiStatus.textContent = 'Enter a valid HTTPS Render backend URL in the YouTube import section.';
+        return;
+      }
+      if (key.length < 16) {
+        aiStatus.textContent = 'Enter the private access key in the YouTube import section.';
+        return;
+      }
+      latestAnalyzedFile = null;
+      aiAnalyzeBtn.disabled = true;
+      aiResults.replaceChildren();
+      aiStatus.textContent = 'Uploading video to your private Render backend for speech analysis...';
+      try {
+        const data = new FormData();
+        data.append('file', file, file.name || 'video.mp4');
+        data.append('rights_confirmed', 'true');
+        const response = await fetch(backendURL + '/api/highlights', {
+          method:'POST', headers:{'X-Clips4U-Key':key}, body:data, cache:'no-store'
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(aiResponseError(response, body));
+        if (!body.job_id) throw new Error('Backend did not return an analysis job');
+        aiStatus.textContent = 'Uploaded. Waiting for faster-whisper analysis; keep this page open.';
+        let result = null;
+        for (let attempt = 0; attempt < 240; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          const poll = await fetch(backendURL + '/api/highlights/' + encodeURIComponent(body.job_id), {
+            headers:{'X-Clips4U-Key':key}, cache:'no-store'
+          });
+          const current = await poll.json().catch(() => ({}));
+          if (!poll.ok) throw new Error(aiResponseError(poll, current));
+          aiStatus.textContent = 'AI highlight analysis: ' + (current.stage || current.status) + '…';
+          if (current.status === 'error') throw new Error(current.error || 'Analysis failed');
+          if (current.status === 'complete') {
+            result = current.result;
+            break;
+          }
+        }
+        if (!result) throw new Error('Analysis is taking too long. Try a shorter video.');
+        if (file !== state.file) throw new Error('The selected video changed. Analyze the new video.');
+        latestAnalyzedFile = file;
+        (result.highlights || []).forEach(addAiMomentCard);
+        aiStatus.textContent = (result.highlights || []).length + ' speech highlight suggestions ready.' +
+          ' Tap Preview, Use this moment, or Process this clip. ' + (result.note || '');
+      } catch (error) {
+        aiStatus.textContent = 'AI analysis failed: ' + (error.message || error);
+      } finally {
+        aiAnalyzeBtn.disabled = false;
       }
     });
 
