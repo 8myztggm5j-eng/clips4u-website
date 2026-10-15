@@ -204,3 +204,8 @@ async def import_video(data: ImportRequest, x_clips4u_key: str | None = Header(d
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+# Keep AI analysis independent from the original authorized YouTube import route.
+from highlights import router as highlights_router
+app.include_router(highlights_router)
