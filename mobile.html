@@ -487,7 +487,7 @@
           <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. AI clips default to the matching blurred-background layout.</div>
           <div id="aiResults" style="display:grid;gap:12px;margin-top:12px;"></div>
         </div>
-        <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet videos may produce fewer distinct clips than requested. Choose 540p, 1080p, or experimental vertical 4K. Higher resolutions take longer and use more memory on Render. Captions are synchronized to recognized speech and can contain transcription errors. YouTube's existing import bot check is unchanged.</div>
+        <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet videos may produce fewer distinct clips than requested. Choose 540p, 1080p, or experimental vertical 4K. Higher resolutions take longer and use more memory on Render. On the 512 MB free plan, start with 1 clip at 15 seconds and 540p. Captions are synchronized to recognized speech and can contain transcription errors. YouTube's existing import bot check is unchanged.</div>
       </section>
 
       <section class="panel">
@@ -1326,6 +1326,7 @@
       clearAiClipUI();
       aiAnalyzeBtn.disabled = true;
       aiStatus.textContent = 'Uploading video to your Render backend…';
+      let aiPhase = 'video upload';
       try {
         const data = new FormData();
         data.append('file', file, file.name || 'video.mp4');
@@ -1341,6 +1342,7 @@
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(aiResponseError(response, body));
         if (!body.job_id) throw new Error('No analysis job returned by backend');
+        aiPhase = 'AI transcription or video rendering';
         aiStatus.textContent = 'Finding ' + clipCount + ' highlight moments and rendering ' +
           clipLength + '-second ' + outputQuality.toUpperCase() + ' videos' +
           (captionsEnabled ? ' with captions' : '') +
@@ -1368,6 +1370,7 @@
           throw new Error('No MP4 files returned. Refresh the page and try again.');
         }
         latestAnalyzedFile = file;
+        aiPhase = 'finished-video download';
         currentAiJob = { id:body.job_id, backendURL, key, file, quality: result.output_quality };
         const preparers = (result.highlights || []).map(moment =>
           addAiMomentCard({...moment, output_quality: result.output_quality}));
@@ -1387,7 +1390,19 @@
           (captionsEnabled ? 'Captions are burned into the MP4s. ' : '') +
           'Files expire from the server after one hour.';
       } catch (error) {
-        aiStatus.textContent = 'AI video generation failed: ' + (error.message || error);
+        const reason = String(error?.message || error);
+        if (/load failed|failed to fetch|networkerror|network request failed/i.test(reason)) {
+          aiStatus.textContent =
+            'The connection to Render was interrupted during ' + aiPhase +
+            '. The server may have restarted or run out of memory (Render Free: 512 MB). ' +
+            'Try one 15-second 540p clip first. If this repeats, the server needs more memory.';
+        } else if (/analysis job has expired|server restarted|404/i.test(reason)) {
+          aiStatus.textContent =
+            'Your AI job was lost because the backend restarted or expired. ' +
+            'Start again with one short 540p clip. If repeated, the Render plan needs more RAM.';
+        } else {
+          aiStatus.textContent = 'AI video generation failed during ' + aiPhase + ': ' + reason;
+        }
       } finally {
         aiAnalyzeBtn.disabled = false;
       }
