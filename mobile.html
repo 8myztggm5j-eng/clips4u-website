@@ -394,7 +394,7 @@
         <p class="lede">Choose a local video, trim it on your phone, and export a one-off clip without uploading anything to a server.</p>
 
         <label class="file-picker" for="videoInput">
-          <input id="videoInput" type="file" accept="video/*">
+          <input id="videoInput" type="file" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv">
           <span>Select local video</span>
         </label>
 
@@ -471,7 +471,7 @@
         </div>
 
         <div class="info-note">
-          On iPhone, after processing, tap <strong>Share / Save Video</strong> and choose <strong>Save Video</strong> in the iOS share sheet to save the finished clip to Photos.
+          On iPhone, first try a 15–30 second clip at 540p. Large source videos may exceed Safari's memory limit. After processing, try <strong>Share / Save Video</strong> or use <strong>Download MP4</strong> to save in Files.
         </div>
       </section>
 
@@ -502,7 +502,10 @@
       ffmpeg: null,
       sourceObjectUrl: null,
       outputObjectUrl: null,
-      processingClipDuration: 0
+      processingClipDuration: 0,
+      busy: false,
+      previewing: false,
+      workerObjectUrl: null
     };
 
     const sourceVideo = document.getElementById('sourceVideo');
@@ -609,6 +612,10 @@
     function attachSourceVideoEvents() {
       sourceVideo.addEventListener('loadedmetadata', () => {
         state.duration = Number.isFinite(sourceVideo.duration) ? sourceVideo.duration : 0;
+        if (state.duration <= 0) {
+          setStatus('Unable to read video duration. Try a different MP4 or MOV.', 'error');
+          return;
+        }
         state.start = 0;
         state.end = Math.min(state.duration, 30);
         startRange.max = String(state.duration);
@@ -618,9 +625,9 @@
       });
 
       sourceVideo.addEventListener('timeupdate', () => {
-        if (sourceVideo.currentTime >= state.end && state.end > state.start) {
+        if (state.previewing && sourceVideo.currentTime >= state.end - 0.1 && state.end > state.start) {
+          state.previewing = false;
           sourceVideo.pause();
-          sourceVideo.currentTime = state.start;
         }
       });
     }
@@ -628,13 +635,17 @@
     async function loadFFmpeg() {
       if (state.ffmpeg) return state.ffmpeg;
 
-      const [{ FFmpeg }, { fetchFile, toBlobURL }] = await Promise.all([
+      const [{ FFmpeg }, { toBlobURL }] = await Promise.all([
         import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js'),
         import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js')
       ]);
 
       const ffmpeg = new FFmpeg();
       const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+      // A same-origin bootstrap lets Safari create the module worker.
+      const workerCode = 'import "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js";';
+      const workerURL = URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' }));
+      state.workerObjectUrl = workerURL;
 
       ffmpeg.on('log', ({ message }) => {
         // Parse time=hh:mm:ss.xx from ffmpeg log and calculate progress relative to clip duration
@@ -650,6 +661,7 @@
       });
 
       await ffmpeg.load({
+        classWorkerURL: workerURL,
         coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
         wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
       });
@@ -664,7 +676,7 @@
         const filter =
           `[0:v]split=2[bgsrc][fgsrc];` +
           `[bgsrc]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},boxblur=8:1,setsar=1[bg];` +
-          `[fgsrc]scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1[fg];` +
+          `[fgsrc]scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg];` +
           `[bg][fg]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2[outv]`;
         return { useFilterComplex: true, filter };
       }
@@ -677,12 +689,12 @@
 
       if (mode === 'classic-vertical') {
         // fit inside then pad to exact frame
-        const filter = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p`;
+        const filter = `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p`;
         return { useFilterComplex: false, filter };
       }
 
       // original: preserve source aspect as closely as possible; scale down to fit within selected resolution without padding
-      const filter = `scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=yuv420p`;
+      const filter = `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,format=yuv420p`;
       return { useFilterComplex: false, filter };
     }
 
@@ -698,6 +710,7 @@
     }
 
     async function processClip() {
+      if (state.busy) return;
       if (!state.file) {
         setStatus('Choose a local video before processing.', 'error');
         return;
@@ -711,6 +724,13 @@
       }
       const clipDuration = Math.max(0.5, rawClipDuration);
 
+      if (state.file.size > 200 * 1024 * 1024 &&
+          !window.confirm('This video exceeds 200 MB. Safari may run out of memory. Try anyway?')) return;
+      state.busy = true;
+      state.previewing = false;
+      sourceVideo.pause();
+      videoInput.disabled = true;
+      let ffmpeg = null, inputName = null, outputName = null;
       // Single processing guard
       processBtn.disabled = true;
       setStatus('Preparing FFmpeg.wasm and processing clip...', '');
@@ -720,11 +740,11 @@
         // set processing duration for progress calculations
         state.processingClipDuration = clipDuration;
 
-        const ffmpeg = await loadFFmpeg();
+        ffmpeg = await loadFFmpeg();
         const { width, height } = getSelectedResolution();
         const exportMode = getSelectedExportStyle();
-        const inputName = `input-${Date.now()}${state.name.includes('.') ? state.name.slice(state.name.lastIndexOf('.')) : '.mp4'}`;
-        const outputName = `clips4u-mobile-clip-${Date.now()}.mp4`;
+        inputName = `input-${Date.now()}${state.name.includes('.') ? state.name.slice(state.name.lastIndexOf('.')) : '.mp4'}`;
+        outputName = `clips4u-mobile-clip-${Date.now()}.mp4`;
 
         const { fetchFile } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
         await ffmpeg.writeFile(inputName, await fetchFile(state.file));
@@ -742,6 +762,8 @@
             '-map', '[outv]',
             '-map', '0:a?',
             '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-threads', '1',
             '-pix_fmt', 'yuv420p',
             '-c:a', 'aac',
             '-movflags', '+faststart',
@@ -754,7 +776,11 @@
             '-t', String(clipDuration),
             '-i', inputName,
             '-vf', filter,
+            '-map', '0:v:0',
+            '-map', '0:a?',
             '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-threads', '1',
             '-pix_fmt', 'yuv420p',
             '-c:a', 'aac',
             '-movflags', '+faststart',
@@ -762,18 +788,13 @@
           ];
         }
 
-        await ffmpeg.exec(parts);
+        const exitCode = await ffmpeg.exec(parts);
+        if (exitCode !== 0) throw new Error('Encoder exit code ' + exitCode);
 
         const data = await ffmpeg.readFile(outputName);
-        const blob = new Blob([data.buffer], { type: 'video/mp4' });
+        const blob = new Blob([data], { type: 'video/mp4' });
 
-        // delete temp files to free FS space in ffmpeg.wasm
-        try {
-          await ffmpeg.deleteFile(inputName);
-        } catch (e) {}
-        try {
-          await ffmpeg.deleteFile(outputName);
-        } catch (e) {}
+        if (!blob.size) throw new Error('Output video is empty.');
 
         // cleanup previous output URL to reduce memory pressure
         if (state.outputObjectUrl) {
@@ -794,10 +815,13 @@
         setProgress(100);
       } catch (error) {
         console.error(error);
-        setStatus('Processing failed. Try a shorter clip or another file format.', 'error');
+        setStatus('Processing failed: ' + (error?.message || error) + '. Try a short MP4 at 540p with Original aspect.', 'error');
       } finally {
+        if (ffmpeg && inputName) { try { await ffmpeg.deleteFile(inputName); } catch (e) {} }
+        if (ffmpeg && outputName) { try { await ffmpeg.deleteFile(outputName); } catch (e) {} }
+        state.busy = false;
         processBtn.disabled = false;
-        // clear processing duration
+        videoInput.disabled = false;
         state.processingClipDuration = 0;
       }
     }
@@ -810,6 +834,7 @@
     }
 
     function handleFileSelection(event) {
+      if (state.busy) return;
       const file = event.target.files && event.target.files[0];
       if (!file) return;
 
@@ -817,6 +842,14 @@
         setStatus('Please choose a valid video file (mp4, mov, m4v, webm, mkv).', 'error');
         return;
       }
+
+      state.previewing = false;
+      sourceVideo.pause();
+      outputVideo.pause();
+      sourceVideo.removeAttribute('src');
+      sourceVideo.load();
+      outputVideo.removeAttribute('src');
+      outputVideo.load();
 
       // Clean up previous source URL to reduce memory
       if (state.sourceObjectUrl) {
@@ -831,6 +864,9 @@
       state.file = file;
       state.name = file.name || 'video';
       state.duration = 0; // unknown until metadata loads
+      state.start = 0;
+      state.end = 0;
+      updateTimeLabels();
 
       // Immediately update meta area so user sees chosen filename
       fileMeta.textContent = `${state.name} • Loading video metadata... • Local file only`;
@@ -845,10 +881,12 @@
       state.processedBlob = null;
       outputVideo.removeAttribute('src');
       try { outputVideo.load(); } catch (e) {}
+      downloadLink.removeAttribute('href');
       outputPanel.classList.remove('visible');
 
       progressTrack.style.display = 'none';
       progressBar.style.width = '0%';
+      videoInput.value = ''; // permit reselecting same video
     }
 
     function setClipStartToCurrent() {
@@ -879,13 +917,14 @@
         setStatus('Choose a video before previewing.', 'error');
         return;
       }
-      const clipLength = Math.max(0.1, state.end - state.start);
+      const clipLength = state.end - state.start;
       if (clipLength <= 0) {
         setStatus('Choose a valid start and end time.', 'error');
         return;
       }
+      state.previewing = true;
       sourceVideo.currentTime = state.start;
-      sourceVideo.play();
+      sourceVideo.play().catch(() => setStatus('Tap Play on the video to preview.', 'error'));
       setStatus(`Previewing clip from ${formatTime(state.start).replace('.0', '')} to ${formatTime(state.end).replace('.0', '')}.`, '');
     }
 
@@ -901,36 +940,18 @@
           // verify canShare when available
           if (navigator.canShare && !navigator.canShare({ files: [file] })) {
             // fallback to download
-            const url = URL.createObjectURL(state.processedBlob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = file.name;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            try { URL.revokeObjectURL(url); } catch (e) {}
+            downloadLink.click()
             setStatus('Your device cannot share files directly — download started instead.', 'success');
             return;
           }
 
-          await navigator.share({
-            title: 'Clips4U clip',
-            text: 'Saved from Clips4U Mobile Video Clipper',
-            files: [file]
-          });
+          await navigator.share({ files: [file] });
 
           setStatus('Share sheet opened. On iPhone, choose Save Video to save it to Photos.', 'success');
           return;
         }
 
-        const url = URL.createObjectURL(state.processedBlob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = file.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        try { URL.revokeObjectURL(url); } catch (e) {}
+        downloadLink.click()
         setStatus('Download started. If your browser does not support direct sharing, use the download option.', 'success');
       } catch (error) {
         if (error && error.name === 'AbortError') {
@@ -977,6 +998,10 @@
       if (state.outputObjectUrl) {
         try { URL.revokeObjectURL(state.outputObjectUrl); } catch (e) {}
         state.outputObjectUrl = null;
+      }
+      if (state.workerObjectUrl) {
+        try { URL.revokeObjectURL(state.workerObjectUrl); } catch (e) {}
+        state.workerObjectUrl = null;
       }
     });
   </script>
