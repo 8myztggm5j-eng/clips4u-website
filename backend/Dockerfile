@@ -15,5 +15,6 @@ ENV OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 TOKENIZERS_PARALL
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('/opt/clips4u-models/tiny', device='cpu', compute_type='int8', cpu_threads=1, num_workers=1); print('Whisper model load verified')"
 COPY app.py /app/app.py
 COPY highlights.py /app/highlights.py
+COPY transcribe_worker.py /app/transcribe_worker.py
 EXPOSE 10000
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
