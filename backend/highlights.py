@@ -14,6 +14,7 @@ import tempfile
 import time
 from threading import Timer
 from pathlib import Path
+from bisect import bisect_left
 from secrets import token_urlsafe
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, UploadFile
@@ -68,118 +69,166 @@ def probe_seconds(video_path: Path) -> float:
     return duration
 
 
-def rank_moments(words: list[dict], duration: float) -> list[dict]:
-    """Build speech-aligned 15-60 second ranges, rank, then avoid overlaps."""
+def rank_moments(words: list[dict], duration: float, clip_length: int, clip_count: int) -> list[dict]:
+    """Rank fixed-duration speech windows, avoiding repeated or near-identical clips."""
+    if duration < clip_length:
+        raise ValueError(f"Your source is shorter than {clip_length} seconds. Choose a shorter clip length.")
     if not words:
         return []
+    starts = [float(w["start"]) for w in words]
     candidates = []
-    for first in range(0, len(words), 7):
-        start = max(0.0, float(words[first]["start"]) - 0.6)
-        for desired in (20, 30, 45, 60):
-            end_limit = min(duration, start + desired)
-            indices = [i for i in range(first, len(words))
-                       if words[i]["end"] <= end_limit]
-            if not indices:
-                continue
-            last = indices[-1]
-            # Prefer ending after a sentence, when close enough to the target.
-            for pos in range(last, max(first - 1, last - 14), -1):
-                if words[pos]["text"].rstrip().endswith((".", "!", "?")) and words[pos]["end"] - start >= 15:
-                    last = pos
-                    break
-            end = min(duration, float(words[last]["end"]) + 0.5)
-            length = end - start
-            if length < 15 or length > 61:
-                continue
-            snippet_words = [w["text"].strip() for w in words[first:last + 1]]
-            script = " ".join(snippet_words)
-            lower = script.lower()
-            count = len(snippet_words)
-            hooks = sum(1 for phrase in HOOKS if re.search(r"\b" + re.escape(phrase) + r"\b", lower))
-            impact = sum(1 for phrase in IMPACT if re.search(r"\b" + re.escape(phrase) + r"\b", lower))
-            density = count / max(length, 1)
-            beginning = words[first]["text"].strip()
-            ending = words[last]["text"].strip()
-            score = 35 + min(15, count / 5.0) + min(17, hooks * 4.3)
-            score += min(13, impact * 4.0) + min(8, script.count("?") * 3 + script.count("!") * 2)
-            score += min(7, density * 2.0) + (5 if ending.endswith((".", "!", "?")) else 0)
-            if beginning and beginning[0].isupper():
-                score += 2
-            if count < 25:
-                score -= 10
-            score = max(1, min(97, round(score)))
-            reason_parts = []
-            if hooks:
-                reason_parts.append("attention-grabbing language")
-            if impact:
-                reason_parts.append("expressive wording")
-            if "?" in script:
-                reason_parts.append("question or curiosity hook")
-            if ending.endswith((".", "!", "?")):
-                reason_parts.append("natural sentence ending")
-            if not reason_parts:
-                reason_parts.append("continuous spoken content")
-            candidates.append({
-                "start": round(start, 1), "end": round(end, 1),
-                "score": score,
-                "reason": ", ".join(reason_parts[:2]).capitalize(),
-                "transcript": script[:460],
-            })
+    seen_starts = set()
+    for first in range(0, len(words), 4):
+        # Keep requested output lengths exact, even when a sentence ends early.
+        start = max(0.0, min(duration - clip_length, starts[first] - 0.5))
+        start = round(start, 1)
+        if start in seen_starts:
+            continue
+        seen_starts.add(start)
+        end = round(start + clip_length, 1)
+        first_index = bisect_left(starts, start)
+        last_index = bisect_left(starts, end)
+        selection = words[first_index:last_index]
+        if not selection:
+            continue
+        script = " ".join(w["text"].strip() for w in selection).strip()
+        lower = script.lower()
+        count = len(selection)
+        hooks = sum(1 for phrase in HOOKS if re.search(r"\b" + re.escape(phrase) + r"\b", lower))
+        impact = sum(1 for phrase in IMPACT if re.search(r"\b" + re.escape(phrase) + r"\b", lower))
+        density = count / max(clip_length, 1)
+        beginning = selection[0]["text"].strip()
+        ending = selection[-1]["text"].strip()
+        opening = " ".join(w["text"].strip() for w in selection[:15]).lower()
+        hook_at_start = sum(1 for phrase in HOOKS if phrase in opening)
+        score = 32 + min(15, count / 5.0) + min(14, hooks * 3.5)
+        score += min(12, impact * 3.5) + min(8, script.count("?") * 3 + script.count("!") * 2)
+        score += min(8, density * 2.0) + min(9, hook_at_start * 4)
+        score += 4 if ending.endswith((".", "!", "?")) else 0
+        if beginning and beginning[0].isupper():
+            score += 2
+        if count < max(12, clip_length // 2):
+            score -= 12
+        score = max(1, min(97, round(score)))
+        reasons = []
+        if hook_at_start:
+            reasons.append("strong opening hook")
+        if hooks:
+            reasons.append("attention-grabbing language")
+        if impact:
+            reasons.append("expressive wording")
+        if "?" in script:
+            reasons.append("curiosity or question")
+        if ending.endswith((".", "!", "?")):
+            reasons.append("natural sentence ending")
+        if not reasons:
+            reasons.append("continuous spoken content")
+        candidates.append({
+            "start": start, "end": end, "score": score,
+            "reason": ", ".join(reasons[:2]).capitalize(),
+            "transcript": script[:460],
+        })
     candidates.sort(key=lambda x: (-x["score"], x["start"]))
     selected = []
+
+    # First pass: no overlap. This produces truly different clips on long videos.
     for item in candidates:
-        if any(max(0, min(item["end"], chosen["end"]) - max(item["start"], chosen["start"])) > 2 for chosen in selected):
-            continue
-        selected.append(item)
-        if len(selected) == 3:
-            break
-    # If the strongest passages overlap, allow distinct overlapping suggestions
-    # rather than forcing a single result when three plausible moments exist.
-    if len(selected) < 3:
+        if all(max(0, min(item["end"], prior["end"]) -
+                   max(item["start"], prior["start"])) <= 1.5 for prior in selected):
+            selected.append(item)
+            if len(selected) == clip_count:
+                break
+    # Second pass: allow some overlap if the source lacks enough distinct segments.
+    if len(selected) < clip_count:
         for item in candidates:
             if item in selected:
                 continue
-            if any(abs(item["start"] - prior["start"]) < 7 for prior in selected):
-                continue
-            if any((max(0, min(item["end"], prior["end"]) - max(item["start"], prior["start"])))
-                   > 0.65 * min(item["end"] - item["start"], prior["end"] - prior["start"])
-                   for prior in selected):
+            if any(abs(item["start"] - prior["start"]) <
+                   max(7, clip_length * 0.42) for prior in selected):
                 continue
             selected.append(item)
-            if len(selected) == 3:
+            if len(selected) == clip_count:
                 break
     selected.sort(key=lambda x: -x["score"])
-    for i, item in enumerate(selected):
-        item["rank"] = i + 1
+    for rank, item in enumerate(selected, 1):
+        item["rank"] = rank
     return selected
 
 
+def subtitle_time(seconds: float) -> str:
+    millis = max(0, int(round(seconds * 1000)))
+    hours, millis = divmod(millis, 3600000)
+    minutes, millis = divmod(millis, 60000)
+    secs, millis = divmod(millis, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-def render_vertical_mp4(source_path: str, target: Path, start: float, end: float) -> None:
-    """Produce a stand-alone iPhone-friendly 540x960 clip without any external URL fetching."""
+
+def write_caption_file(words: list[dict], start: float, end: float, target: Path) -> bool:
+    """Make relative-time SRT subtitles in 2-5 word blocks for readable mobile captions."""
+    timed = [w for w in words if float(w["end"]) > start and float(w["start"]) < end]
+    lines = []
+    group = []
+    for word in timed:
+        token = str(word["text"]).strip().replace("-->", "").replace("<", "").replace(">", "")
+        if not token:
+            continue
+        group.append((max(0.0, float(word["start"]) - start),
+                      min(end - start, float(word["end"]) - start), token))
+        span = group[-1][1] - group[0][0]
+        if len(group) >= 5 or span >= 2.5 or (len(group) >= 2 and token.endswith((".", "!", "?"))):
+            lines.append(group)
+            group = []
+    if group:
+        lines.append(group)
+    if not lines:
+        return False
+    chunks = []
+    for idx, group in enumerate(lines, 1):
+        start_at = group[0][0]
+        end_at = max(start_at + 0.2, group[-1][1])
+        phrase = " ".join(item[2] for item in group)
+        chunks.append(f"{idx}\n{subtitle_time(start_at)} --> {subtitle_time(end_at)}\n{phrase}\n")
+    target.write_text("\n".join(chunks), encoding="utf-8")
+    return True
+
+
+def render_vertical_mp4(source_path: str, target: Path, start: float, end: float,
+                        subtitle_path: Path | None) -> None:
+    """Render iPhone-friendly vertical MP4; optionally burn in synchronized speech captions."""
     seconds = round(end - start, 2)
     if not 0 < seconds <= 61:
         raise ValueError("Invalid highlight timestamps")
+    filters = [
+        "scale=540:960:force_original_aspect_ratio=increase",
+        "crop=540:960", "setsar=1", "fps=24"
+    ]
+    if subtitle_path:
+        # Paths are generated in a trusted temporary folder, never provided by users.
+        style = "FontName=DejaVu Sans,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=130"
+        filters.append(f"subtitles=filename='{subtitle_path}':force_style='{style}'")
     try:
         result = subprocess.run([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
             "-y", "-ss", str(start), "-i", source_path, "-t", str(seconds),
             "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", "scale=540:960:force_original_aspect_ratio=increase,crop=540:960,setsar=1,fps=24",
+            "-vf", ",".join(filters),
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
             "-threads", "2", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k",
             "-movflags", "+faststart", str(target)
         ], capture_output=True, timeout=240)
     except subprocess.TimeoutExpired as exc:
-        raise ValueError("Rendering took too long. Try a shorter source video.") from exc
+        raise ValueError("Rendering took too long. Try fewer or shorter clips.") from exc
     if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
-        raise ValueError("Couldn't render one of the MP4 clips. Try a smaller or simpler video.")
+        logger.warning("clip rendering failed stage=ffmpeg exit=%s captions=%s",
+                       result.returncode, bool(subtitle_path))
+        raise ValueError("Couldn't render a video. Try a shorter clip or switch captions off.")
     if target.stat().st_size > MAX_BYTES:
         raise ValueError("A rendered clip exceeded the size limit.")
 
 
-def analyze(job_id: str, folder: str, source_path: str) -> None:
+def analyze(job_id: str, folder: str, source_path: str,
+            clip_count: int, clip_length: int, captions: bool) -> None:
     global ACTIVE_JOB
     job = JOBS[job_id]
     try:
@@ -211,30 +260,42 @@ def analyze(job_id: str, folder: str, source_path: str) -> None:
         job.update(stage="Ranking speech highlights", updated=time.time())
         if len(words) < 6:
             raise ValueError("Not enough recognizable speech to find meaningful highlights.")
-        highlights = rank_moments(words, duration)
+        highlights = rank_moments(words, duration, clip_length, clip_count)
         if not highlights:
-            raise ValueError("No complete 15–60 second speech highlights found. Try a longer speaking video.")
+            raise ValueError("No suitable spoken highlights were found at that length. Try shorter clips or a speech-heavy video.")
         # Render the selected moments as real, separate MP4 files. No user
         # interaction or on-device FFmpeg is required to produce the three clips.
         clips = []
         for i, highlight in enumerate(highlights, start=1):
             job.update(stage=f"Rendering video {i} of {len(highlights)}", updated=time.time())
             output_path = Path(folder) / f"clip_{i}.mp4"
-            render_vertical_mp4(source_path, output_path, highlight["start"], highlight["end"])
+            subtitle_path = None
+            if captions:
+                candidate = Path(folder) / f"captions_{i}.srt"
+                if write_caption_file(words, highlight["start"], highlight["end"], candidate):
+                    subtitle_path = candidate
+                else:
+                    raise ValueError("No recognizable words to caption. Try again with captions turned off.")
+            render_vertical_mp4(source_path, output_path, highlight["start"], highlight["end"], subtitle_path)
+            if subtitle_path:
+                subtitle_path.unlink(missing_ok=True)
             clips.append({"rank": i, "filename": f"clips4u-highlight-{i}.mp4",
-                          "bytes": output_path.stat().st_size})
+                          "bytes": output_path.stat().st_size, "captions": captions})
         # Retain only the short finished clips temporarily; discard source/audio
         # before notifying the iPhone that all exports are available.
         Path(source_path).unlink(missing_ok=True)
         audio_path.unlink(missing_ok=True)
         job["output_dir"] = folder
-        job.update(status="complete", stage="3 MP4 clips ready" if len(clips) == 3 else "MP4 clips ready", result={
+        job.update(status="complete", stage=f"{len(clips)} MP4 clips ready", result={
             "highlights": highlights,
             "clips": clips,
             "duration": round(duration, 1),
+            "requested_count": clip_count,
+            "clip_length_seconds": clip_length,
+            "captions": captions,
             "language": info.language,
             "method": "faster-whisper transcription + speech-content scoring",
-            "note": "Rankings are based on speech; videos are 9:16 center-cropped MP4s. Source videos without enough distinct speech may yield fewer than three."
+            "note": "Videos are 9:16 MP4s selected using speech. Some moments can overlap when there are few distinct highlights."
         }, updated=time.time())
         # Clear temporary exported files even if no more API requests arrive.
         expiration = Timer(EXPIRE_SECONDS + 60, cleanup_jobs)
@@ -258,12 +319,19 @@ async def start_highlights(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     rights_confirmed: str = Form("false"),
+    clip_count: int = Form(3),
+    clip_length: int = Form(30),
+    captions: bool = Form(True),
     x_clips4u_key: str | None = Header(default=None),
 ):
     global ACTIVE_JOB
     require_key(x_clips4u_key)
     if rights_confirmed.lower() != "true":
         raise HTTPException(400, "Confirm you own or are allowed to analyze this video")
+    if not 1 <= clip_count <= 5:
+        raise HTTPException(400, "Choose between 1 and 5 clips")
+    if clip_length not in (15, 20, 30, 45, 60):
+        raise HTTPException(400, "Choose a clip length of 15, 20, 30, 45 or 60 seconds")
     cleanup_jobs()
     if ACTIVE_JOB is not None:
         raise HTTPException(429, "Another highlight analysis is underway. Try again shortly.")
@@ -290,7 +358,8 @@ async def start_highlights(
     job_id = token_urlsafe(20)
     JOBS[job_id] = {"status": "queued", "stage": "Waiting to analyze", "updated": time.time()}
     ACTIVE_JOB = job_id
-    background_tasks.add_task(analyze, job_id, folder, str(dest))
+    background_tasks.add_task(analyze, job_id, folder, str(dest),
+                              clip_count, clip_length, captions)
     return {"job_id": job_id, "status": "queued"}
 
 
