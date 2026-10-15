@@ -452,6 +452,7 @@
               <label class="radio"><input type="radio" name="exportStyle" value="center-crop"> 9:16 center crop</label>
               <label class="radio"><input type="radio" name="exportStyle" value="classic-vertical"> 9:16 full frame</label>
             </div>
+            <p style="color:var(--muted);font-size:0.85rem;margin:10px 0 0;">The preview above shows your original video. Blur is added to the finished export.</p>
 
             <div class="label-row" style="margin-top:16px;"><span>Output resolution</span></div>
             <select id="resolutionSelect">
@@ -689,11 +690,15 @@
     function getExportFilter(mode, width, height) {
       // Returns an object describing whether to use filter_complex and the filter string
       if (mode === 'vertical-blur') {
+        // Fit the sharp video slightly INSIDE the output so the blurred background
+        // remains visible even when the source is already a vertical 9:16 video.
+        const foregroundWidth = Math.floor(width * 0.88 / 2) * 2;
+        const foregroundHeight = Math.floor(height * 0.88 / 2) * 2;
         const filter =
           `[0:v]split=2[bgsrc][fgsrc];` +
-          `[bgsrc]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},boxblur=8:1,setsar=1[bg];` +
-          `[fgsrc]scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg];` +
-          `[bg][fg]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2[outv]`;
+          `[bgsrc]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},boxblur=18:2,setsar=1[bg];` +
+          `[fgsrc]scale=${foregroundWidth}:${foregroundHeight}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg];` +
+          `[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto,format=yuv420p[outv]`;
         return { useFilterComplex: true, filter };
       }
 
