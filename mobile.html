@@ -936,7 +936,7 @@
     const ytImportBtn = document.getElementById('ytImportBtn');
     const ytImportStatus = document.getElementById('ytImportStatus');
     try {
-      ytServer.value = localStorage.getItem('clips4uImportServer') || '';
+      ytServer.value = localStorage.getItem('clips4uImportServer') || 'https://clips4u-import.onrender.com';
       ytKey.value = sessionStorage.getItem('clips4uImportSessionKey') || '';
     } catch (e) {}
 
