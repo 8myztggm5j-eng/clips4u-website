@@ -8,5 +8,6 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 COPY app.py /app/app.py
+COPY highlights.py /app/highlights.py
 EXPOSE 10000
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
