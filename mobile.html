@@ -657,7 +657,7 @@
 
       const ffmpeg = new FFmpeg();
       ffmpeg.on('log', ({ message }) => {
-        const match = message.match(/time=(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)/);
+        const match = message.match(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/);
         if (match && state.processingClipDuration > 0) {
           const elapsed = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
           setProgress(Math.min(95, (elapsed / state.processingClipDuration) * 95));
