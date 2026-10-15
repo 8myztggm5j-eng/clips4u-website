@@ -399,6 +399,9 @@
         </label>
 
         <div id="fileMeta" class="meta">No video selected yet.</div>
+        <div class="inline-actions">
+          <button class="danger-button" id="resetClipperBtn" type="button">↻ Reset / Start Over</button>
+        </div>
 
         <div class="video-wrap">
           <video id="sourceVideo" playsinline webkit-playsinline controls preload="metadata"></video>
@@ -423,18 +426,44 @@
       </section>
 
       <section class="panel" id="aiHighlightsPanel">
-        <h2 style="margin:0 0 8px;">AI: Generate 3 Video Clips</h2>
-        <p class="lede">Find the strongest spoken moments, then automatically create separate 9:16 MP4 videos. Works with local videos and successfully imported YouTube videos.</p>
+        <h2 style="margin:0 0 8px;">AI: Generate Highlight Clips</h2>
+        <p class="lede">Choose how many clips to create, set their exact length, and optionally burn captions into each 9:16 MP4. Works with local videos and successfully imported YouTube videos.</p>
         <div class="control-box">
           <label style="display:flex;align-items:flex-start;gap:10px;color:var(--muted);font-size:.9rem;margin-bottom:14px;">
             <input type="checkbox" id="aiRights" style="width:20px;height:20px;flex:0 0 20px;accent-color:var(--blue);">
             <span>I have permission to analyze and edit this video. My Render backend deletes the original upload after rendering and keeps finished clips temporarily (up to one hour) so I can save them.</span>
           </label>
-          <button class="button" id="aiAnalyzeBtn" type="button" style="width:100%;">Generate 3 Video Clips</button>
+          <div class="time-grid" style="margin-bottom:14px;">
+            <div>
+              <label class="label-row" for="aiClipCount">Number of clips</label>
+              <select id="aiClipCount">
+                <option value="1">1 video</option>
+                <option value="2">2 videos</option>
+                <option value="3" selected>3 videos</option>
+                <option value="4">4 videos</option>
+                <option value="5">5 videos</option>
+              </select>
+            </div>
+            <div>
+              <label class="label-row" for="aiClipLength">Length of each clip</label>
+              <select id="aiClipLength">
+                <option value="15">15 seconds</option>
+                <option value="20">20 seconds</option>
+                <option value="30" selected>30 seconds</option>
+                <option value="45">45 seconds</option>
+                <option value="60">60 seconds</option>
+              </select>
+            </div>
+          </div>
+          <label class="radio" style="margin-bottom:14px;">
+            <input id="aiCaptions" type="checkbox" checked>
+            <span>Burn automatic speech captions onto videos</span>
+          </label>
+          <button class="button" id="aiAnalyzeBtn" type="button" style="width:100%;">Generate Highlight Videos</button>
           <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. Uses the same backend URL and access key as YouTube import.</div>
           <div id="aiResults" style="display:grid;gap:12px;margin-top:12px;"></div>
         </div>
-        <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet source videos may yield fewer than three distinct clips. Downloads are rendered in 9:16 (540p) by Render, and may take several minutes. YouTube's existing import bot check is unchanged.</div>
+        <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet videos may produce fewer distinct clips than requested. Finished clips are rendered in 9:16 (540p) by Render and may take several minutes. Captions are synchronized to recognized speech and can contain transcription errors. YouTube's existing import bot check is unchanged.</div>
       </section>
 
       <section class="panel">
@@ -562,6 +591,7 @@
     const outputVideo = document.getElementById('outputVideo');
     const shareBtn = document.getElementById('shareBtn');
     const downloadLink = document.getElementById('downloadLink');
+    const resetClipperBtn = document.getElementById('resetClipperBtn');
 
     function setStatus(message, tone = '') {
       statusEl.textContent = message;
@@ -1038,6 +1068,9 @@
     const aiStatus = document.getElementById('aiStatus');
     const aiResults = document.getElementById('aiResults');
     const aiRights = document.getElementById('aiRights');
+    const aiClipCount = document.getElementById('aiClipCount');
+    const aiClipLength = document.getElementById('aiClipLength');
+    const aiCaptions = document.getElementById('aiCaptions');
     let latestAnalyzedFile = null;
     let currentAiJob = null;
     const aiClipBlobs = new Map();
@@ -1077,7 +1110,7 @@
     async function getAiClipBlob(rank) {
       const job = currentAiJob;
       if (!job || job.file !== state.file) throw new Error('Select and analyze the video again.');
-      if (!Number.isInteger(rank) || rank < 1 || rank > 3) throw new Error('Invalid clip number');
+      if (!Number.isInteger(rank) || rank < 1 || rank > 5) throw new Error('Invalid clip number');
       if (aiClipBlobs.has(rank)) return aiClipBlobs.get(rank);
       const pending = (async () => {
         const response = await fetch(job.backendURL + '/api/highlights/' +
@@ -1240,6 +1273,9 @@
       }
       const backendURL = ytServer.value.trim().replace(/\/+$/, '');
       const key = ytKey.value.trim();
+      const clipCount = Number(aiClipCount.value);
+      const clipLength = Number(aiClipLength.value);
+      const captionsEnabled = aiCaptions.checked;
       try {
         const url = new URL(backendURL);
         if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/')
@@ -1259,13 +1295,18 @@
         const data = new FormData();
         data.append('file', file, file.name || 'video.mp4');
         data.append('rights_confirmed', 'true');
+        data.append('clip_count', String(clipCount));
+        data.append('clip_length', String(clipLength));
+        data.append('captions', String(captionsEnabled));
         const response = await fetch(backendURL + '/api/highlights', {
           method: 'POST', headers:{'X-Clips4U-Key': key}, body:data, cache:'no-store'
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(aiResponseError(response, body));
         if (!body.job_id) throw new Error('No analysis job returned by backend');
-        aiStatus.textContent = 'Finding the best moments and rendering three videos. Keep this page open.';
+        aiStatus.textContent = 'Finding ' + clipCount + ' highlight moments and rendering ' +
+          clipLength + '-second videos' + (captionsEnabled ? ' with captions' : '') +
+          '. Keep this page open.';
         let result = null;
         for (let attempt = 0; attempt < 240; attempt++) {
           await new Promise(resolve => setTimeout(resolve, 3000));
@@ -1298,8 +1339,9 @@
         }
         aiStatus.textContent = ready + ' separate MP4 video' + (ready === 1 ? '' : 's') +
           ' loaded out of ' + result.clips.length +
-          '. Scroll down to watch or save each video. ' +
-          (result.clips.length < 3 ? 'There were not enough distinct spoken moments for 3 clips. ' : '') +
+          ' requested ' + clipCount + '. Scroll down to watch or save each video. ' +
+          (result.clips.length < clipCount ? 'There were not enough distinct spoken moments for all requested clips. ' : '') +
+          (captionsEnabled ? 'Captions are burned into the MP4s. ' : '') +
           'Files expire from the server after one hour.';
       } catch (error) {
         aiStatus.textContent = 'AI video generation failed: ' + (error.message || error);
@@ -1381,6 +1423,27 @@
         }
       }
     }
+
+    // Full page reset clears files, video previews, generated links, progress,
+    // clip controls and form inputs while retaining the existing Render connection.
+    // Re-loading also stops local FFmpeg work and detaches any AI status polling;
+    // a Render job already started may continue running on the server.
+    resetClipperBtn.addEventListener('click', () => {
+      const hasWork = !!state.file || !!state.processedBlob || !!ytLink.value.trim() ||
+        aiResults.children.length > 0 || state.busy || state.importing || aiAnalyzeBtn.disabled;
+      if (hasWork) {
+        const inProgress = state.busy || state.importing || aiAnalyzeBtn.disabled;
+        const warning = inProgress
+          ? 'Processing is still running. Resetting closes this page\'s progress and may not stop a Render job already started. Unsaved clips may be lost. Start over?'
+          : 'Start over? Unsaved clips and selections on this page will be cleared. Saved videos on your phone will not be deleted.';
+        if (!window.confirm(warning)) return;
+      }
+      try {
+        if (ytServer.value.trim()) localStorage.setItem('clips4uImportServer', ytServer.value.trim());
+        if (ytKey.value.trim()) sessionStorage.setItem('clips4uImportSessionKey', ytKey.value.trim());
+      } catch (e) {}
+      window.location.reload();
+    });
 
     // Event wiring
     videoInput.addEventListener('change', handleFileSelection);
