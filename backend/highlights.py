@@ -197,11 +197,11 @@ def write_caption_file(words: list[dict], start: float, end: float, target: Path
 
 def render_vertical_mp4(source_path: str, target: Path, start: float, end: float,
                         subtitle_path: Path | None, output_quality: str = "540p",
-                        video_layout: str = "blur") -> None:
-    """Compose matching blurred background + sharp fitted foreground, or center-crop.
+                        video_layout: str = "portrait_blur") -> None:
+    """Compose portrait or wide foreground with synchronized blurred backdrop.
 
-    Both layers derive from the same source video frame using FFmpeg split, so
-    they always stay synchronized. All output formats are vertical 9:16.
+    portrait_blur creates a sharp 9:16 center-cropped foreground with a narrow
+    blurred border. blur preserves the full wide image; crop fills the screen.
     """
     seconds = round(end - start, 2)
     if not 0 < seconds <= 61:
@@ -209,7 +209,7 @@ def render_vertical_mp4(source_path: str, target: Path, start: float, end: float
     if output_quality not in OUTPUT_SIZES:
         raise ValueError("Unsupported output quality")
     width, height = OUTPUT_SIZES[output_quality]
-    if video_layout not in ("blur", "crop"):
+    if video_layout not in ("portrait_blur", "blur", "crop"):
         raise ValueError("Unsupported video layout")
     is_4k = output_quality == "4k"
     style = None
@@ -226,20 +226,30 @@ def render_vertical_mp4(source_path: str, target: Path, start: float, end: float
         if subtitle_path else None
     )
 
-    if video_layout == "blur":
-        # Match the manual mobile '9:16 vertical + blur' layout: the blurred
-        # full-frame background and fitted foreground show the SAME instant.
-        # Blur a small background and enlarge it later to conserve 4K RAM.
-        foreground_width = int(width * 0.88) // 2 * 2
-        foreground_height = int(height * 0.88) // 2 * 2
+    if video_layout in ("portrait_blur", "blur"):
+        # Both foreground and blurred background are copies of the same frame.
+        # Blurring at a small size keeps 4K memory demands lower.
+        foreground_width = int(width * 0.90) // 2 * 2
+        foreground_height = int(height * 0.90) // 2 * 2
+        if video_layout == "portrait_blur":
+            # Truly portrait front: wide footage loses the sides by center crop.
+            foreground_filter = (
+                f"scale={foreground_width}:{foreground_height}:"
+                "force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={foreground_width}:{foreground_height},setsar=1"
+            )
+        else:
+            foreground_filter = (
+                f"scale={foreground_width}:{foreground_height}:"
+                "force_original_aspect_ratio=decrease:"
+                "force_divisible_by=2:flags=lanczos,setsar=1"
+            )
         graph = (
             "[0:v]fps=24,split=2[bgsrc][fgsrc];"
             "[bgsrc]scale=270:480:force_original_aspect_ratio=increase,"
             f"crop=270:480,boxblur=18:2,scale={width}:{height}:flags=bicubic,"
             "setsar=1[bg];"
-            f"[fgsrc]scale={foreground_width}:{foreground_height}:"
-            "force_original_aspect_ratio=decrease:force_divisible_by=2:"
-            "flags=lanczos,setsar=1[fg];"
+            f"[fgsrc]{foreground_filter}[fg];"
             "[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto,format=yuv420p"
         )
         if subtitle_filter:
@@ -284,7 +294,7 @@ def render_vertical_mp4(source_path: str, target: Path, start: float, end: float
 
 def analyze(job_id: str, folder: str, source_path: str,
             clip_count: int, clip_length: int, captions: bool,
-            output_quality: str = "540p", video_layout: str = "blur") -> None:
+            output_quality: str = "540p", video_layout: str = "portrait_blur") -> None:
     global ACTIVE_JOB
     job = JOBS[job_id]
     try:
@@ -371,7 +381,7 @@ def analyze(job_id: str, folder: str, source_path: str,
             "height": OUTPUT_SIZES[output_quality][1],
             "language": language,
             "method": "faster-whisper transcription + speech-content scoring",
-            "note": "Blur layout uses synchronized sharp and blurred copies of the same video. 4K is resolution upscaling, not AI detail restoration."
+            "note": "Portrait blur shows a sharp 9:16 center-cropped foreground over matching blurred footage. Wide source videos lose their outer sides. 4K is an upscale, not AI detail restoration."
         }, updated=time.time())
         # Clear temporary exported files even if no more API requests arrive.
         expiration = Timer(EXPIRE_SECONDS + 60, cleanup_jobs)
@@ -399,7 +409,7 @@ async def start_highlights(
     clip_length: int = Form(30),
     captions: bool = Form(True),
     output_quality: str = Form("540p"),
-    video_layout: str = Form("blur"),
+    video_layout: str = Form("portrait_blur"),
     x_clips4u_key: str | None = Header(default=None),
 ):
     global ACTIVE_JOB
@@ -412,8 +422,8 @@ async def start_highlights(
         raise HTTPException(400, "Choose a clip length of 15, 20, 30, 45 or 60 seconds")
     if output_quality not in OUTPUT_SIZES:
         raise HTTPException(400, "Choose 540p, 1080p or 4k output quality")
-    if video_layout not in ("blur", "crop"):
-        raise HTTPException(400, "Choose blurred background or center crop")
+    if video_layout not in ("portrait_blur", "blur", "crop"):
+        raise HTTPException(400, "Choose portrait blur, full-width blur, or center crop")
     cleanup_jobs()
     if ACTIVE_JOB is not None:
         raise HTTPException(429, "Another highlight analysis is underway. Try again shortly.")
