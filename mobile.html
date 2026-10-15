@@ -423,18 +423,18 @@
       </section>
 
       <section class="panel" id="aiHighlightsPanel">
-        <h2 style="margin:0 0 8px;">AI: Find the 3 strongest moments</h2>
-        <p class="lede">Use speech analysis to suggest three high-potential 15–60 second highlights. Works with a local video or a successfully imported YouTube video.</p>
+        <h2 style="margin:0 0 8px;">AI: Generate 3 Video Clips</h2>
+        <p class="lede">Find the strongest spoken moments, then automatically create separate 9:16 MP4 videos. Works with local videos and successfully imported YouTube videos.</p>
         <div class="control-box">
           <label style="display:flex;align-items:flex-start;gap:10px;color:var(--muted);font-size:.9rem;margin-bottom:14px;">
             <input type="checkbox" id="aiRights" style="width:20px;height:20px;flex:0 0 20px;accent-color:var(--blue);">
-            <span>I have permission to analyze this video and agree to send a temporary copy to my private Render backend. The backend deletes its copy after processing.</span>
+            <span>I have permission to analyze and edit this video. My Render backend deletes the original upload after rendering and keeps finished clips temporarily (up to one hour) so I can save them.</span>
           </label>
-          <button class="button" id="aiAnalyzeBtn" type="button" style="width:100%;">Find 3 Best Moments</button>
+          <button class="button" id="aiAnalyzeBtn" type="button" style="width:100%;">Generate 3 Video Clips</button>
           <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. Uses the same backend URL and access key as YouTube import.</div>
           <div id="aiResults" style="display:grid;gap:12px;margin-top:12px;"></div>
         </div>
-        <div class="info-note">Faster-whisper identifies spoken content, not visual action or musical peaks. Scores are suggestions, not a guarantee of views. iPhone Safari may have difficulty processing large exports. YouTube's existing server-side bot check is unchanged.</div>
+        <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet source videos may yield fewer than three distinct clips. Downloads are rendered in 9:16 (540p) by Render, and may take several minutes. YouTube's existing import bot check is unchanged.</div>
       </section>
 
       <section class="panel">
@@ -889,6 +889,7 @@
 
     function loadSelectedVideo(file) {
       if (state.busy || !file) return;
+      clearAiClipUI();
       if (!looksLikeVideoFile(file)) {
         setStatus('Please choose a valid video file (mp4, mov, m4v, webm, mkv).', 'error');
         return;
@@ -1031,37 +1032,73 @@
     });
 
 
-    // Analyze the same in-browser File object used by the clip editor. This also
-    // handles authorized YouTube imports after loadSelectedVideo(file) succeeds.
+    // The same file is used for local videos and authorized imported videos.
+    // AI videos are rendered on Render, not within Safari's FFmpeg.wasm worker.
     const aiAnalyzeBtn = document.getElementById('aiAnalyzeBtn');
     const aiStatus = document.getElementById('aiStatus');
     const aiResults = document.getElementById('aiResults');
     const aiRights = document.getElementById('aiRights');
     let latestAnalyzedFile = null;
+    let currentAiJob = null;
+    const aiClipBlobs = new Map();
+    const aiClipUrls = new Map();
 
-    function selectAiMoment(moment, shouldProcess = false, shouldPreview = false) {
+    function clearAiClipUI() {
+      latestAnalyzedFile = null;
+      currentAiJob = null;
+      for (const url of aiClipUrls.values()) URL.revokeObjectURL(url);
+      aiClipUrls.clear();
+      aiClipBlobs.clear();
+      aiResults.replaceChildren();
+    }
+
+    function selectAiMoment(moment, shouldProcess = false) {
       if (!state.file || state.file !== latestAnalyzedFile) {
-        aiStatus.textContent = 'The video has changed. Analyze the current video first.';
+        aiStatus.textContent = 'The selected video changed. Please analyze it again.';
         return;
       }
       if (!state.duration || moment.start >= state.duration) {
-        aiStatus.textContent = 'The video duration is unavailable. Wait for it to load.';
+        aiStatus.textContent = 'Video duration is still loading. Try again in a moment.';
         return;
       }
       state.start = Math.max(0, Math.min(state.duration, moment.start));
       state.end = Math.max(state.start, Math.min(state.duration, moment.end));
       updateTimeLabels();
       sourceVideo.currentTime = state.start;
-      setStatus('AI moment selected: ' + formatTime(state.start) + ' to ' + formatTime(state.end) +
-        '. You can fine-tune the timing or process the clip.', 'success');
-      if (shouldProcess) {
-        processClip();
-      } else if (shouldPreview) {
-        state.previewing = true;
-        sourceVideo.play().catch(() => setStatus('Tap Play in the video to preview this moment.', ''));
-        sourceVideo.scrollIntoView({behavior:'smooth', block:'center'});
-      } else {
-        startRange.scrollIntoView({behavior:'smooth', block:'center'});
+      setStatus('Moment selected. You can adjust the timing or process your own version.', 'success');
+      if (shouldProcess) processClip();
+      else startRange.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function aiResponseError(response, body) {
+      return body && typeof body.detail === 'string' ? body.detail : 'Backend HTTP ' + response.status;
+    }
+
+    async function getAiClipBlob(rank) {
+      const job = currentAiJob;
+      if (!job || job.file !== state.file) throw new Error('Select and analyze the video again.');
+      if (!Number.isInteger(rank) || rank < 1 || rank > 3) throw new Error('Invalid clip number');
+      if (aiClipBlobs.has(rank)) return aiClipBlobs.get(rank);
+      const pending = (async () => {
+        const response = await fetch(job.backendURL + '/api/highlights/' +
+          encodeURIComponent(job.id) + '/clip/' + rank, {
+          headers: { 'X-Clips4U-Key': job.key }, cache: 'no-store'
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(aiResponseError(response, body));
+        }
+        const blob = await response.blob();
+        if (!blob.size || blob.size > 90 * 1024 * 1024) throw new Error('Clip is empty or too large.');
+        if (job !== currentAiJob || job.file !== state.file) throw new Error('The selected video changed.');
+        return blob;
+      })();
+      aiClipBlobs.set(rank, pending);
+      try {
+        return await pending;
+      } catch (error) {
+        aiClipBlobs.delete(rank);
+        throw error;
       }
     }
 
@@ -1070,56 +1107,135 @@
       card.className = 'control-box';
       const heading = document.createElement('div');
       heading.style.cssText = 'font-weight:800;margin-bottom:6px;color:var(--gold);';
-      heading.textContent = '#' + moment.rank + ' · Highlight score ' + moment.score + '/100';
+      heading.textContent = 'Video ' + moment.rank + ' · AI score ' + moment.score + '/100';
       const time = document.createElement('div');
       time.style.cssText = 'font-weight:700;margin-bottom:7px;';
       time.textContent = formatTime(moment.start).replace('.0','') + ' – ' + formatTime(moment.end).replace('.0','');
-      const why = document.createElement('div');
-      why.style.cssText = 'color:var(--muted);font-size:.88rem;margin-bottom:8px;';
-      why.textContent = moment.reason || 'Speech-based suggestion';
+      const reason = document.createElement('p');
+      reason.style.cssText = 'color:var(--muted);font-size:.9rem;margin:0 0 8px;';
+      reason.textContent = moment.reason || 'Speech-based suggestion';
       const transcript = document.createElement('p');
-      transcript.style.cssText = 'color:var(--text);font-size:.92rem;line-height:1.5;margin:0 0 12px;';
-      transcript.textContent = '“' + (moment.transcript || 'No transcript snippet') + '”';
+      transcript.style.cssText = 'color:var(--text);font-size:.9rem;line-height:1.4;margin:0 0 12px;';
+      transcript.textContent = (moment.transcript || '').slice(0,230);
+      const video = document.createElement('video');
+      video.controls = true;
+      video.playsInline = true;
+      video.preload = 'none';
+      video.style.cssText = 'display:none;width:100%;max-height:400px;border-radius:12px;margin-bottom:10px;';
+      const note = document.createElement('div');
+      note.className = 'meta';
+      note.style.margin = '0 0 10px';
+      note.textContent = 'Preparing this finished MP4 for iPhone preview…';
       const actions = document.createElement('div');
       actions.className = 'inline-actions';
       actions.style.marginTop = '0';
-      const preview = document.createElement('button');
-      preview.type = 'button';
-      preview.className = 'secondary-button';
-      preview.textContent = 'Preview';
-      preview.addEventListener('click', () => selectAiMoment(moment, false, true));
-      const use = document.createElement('button');
-      use.type = 'button';
-      use.className = 'secondary-button';
-      use.textContent = 'Use this moment';
-      use.addEventListener('click', () => selectAiMoment(moment));
-      const render = document.createElement('button');
-      render.type = 'button';
-      render.className = 'button';
-      render.textContent = 'Process this clip';
-      render.addEventListener('click', () => selectAiMoment(moment, true));
-      actions.append(preview, use, render);
-      card.append(heading, time, why, transcript, actions);
+      const share = document.createElement('button');
+      share.type = 'button';
+      share.className = 'button';
+      share.textContent = 'Share / Save Video';
+      share.disabled = true;
+      const download = document.createElement('a');
+      download.className = 'secondary-button';
+      download.textContent = 'Preparing MP4…';
+      download.download = 'clips4u-highlight-' + moment.rank + '.mp4';
+      download.setAttribute('aria-disabled','true');
+      const customize = document.createElement('button');
+      customize.type = 'button';
+      customize.className = 'secondary-button';
+      customize.textContent = 'Adjust timing';
+      customize.addEventListener('click', () => selectAiMoment(moment, false));
+      const buttons = [share, download, customize];
+      for (const button of buttons) actions.appendChild(button);
+      card.append(heading, time, reason, transcript, video, note, actions);
       aiResults.appendChild(card);
-    }
-
-    function aiResponseError(response, body) {
-      return (body && typeof body.detail === 'string') ? body.detail : 'Backend HTTP ' + response.status;
+      share.addEventListener('click', async () => {
+        if (!currentAiJob || state.file !== latestAnalyzedFile) {
+          note.textContent = 'Select and analyze the video again.';
+          return;
+        }
+        try {
+          const blob = await getAiClipBlob(moment.rank);
+          const filename = 'clips4u-highlight-' + moment.rank + '.mp4';
+          const file = new File([blob], filename, {type:'video/mp4'});
+          if (navigator.share && (!navigator.canShare || navigator.canShare({files:[file]}))) {
+            await navigator.share({files:[file], title:filename});
+            note.textContent = 'Share sheet opened. Choose Save Video or Save to Files.';
+          } else {
+            note.textContent = 'Direct sharing unavailable. Use Download MP4 below.';
+          }
+        } catch (error) {
+          if (error && error.name === 'AbortError') return;
+          note.textContent = 'Share failed: ' + (error.message || error) + '. Try Download MP4.';
+        }
+      });
+      // Load each finished video as an authenticated blob, then show its player
+      // and a real downloadable file link (not a timestamp).
+      return async () => {
+        try {
+          const blob = await getAiClipBlob(moment.rank);
+          if (!currentAiJob || state.file !== latestAnalyzedFile) return false;
+          const url = URL.createObjectURL(blob);
+          aiClipUrls.set(moment.rank, url);
+          video.src = url;
+          video.style.display = 'block';
+          download.href = url;
+          download.textContent = 'Download MP4';
+          download.removeAttribute('aria-disabled');
+          share.disabled = false;
+          note.textContent = 'Finished video ready (' + (blob.size / (1024*1024)).toFixed(1) +
+            ' MB). Tap Play, Download MP4, or Share / Save Video.';
+          return true;
+        } catch (error) {
+          note.textContent = 'Could not load this rendered MP4: ' + (error.message || error);
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'secondary-button';
+          retry.textContent = 'Retry loading video';
+          retry.addEventListener('click', async () => {
+            retry.disabled = true;
+            const ok = await prepare();
+            if (!ok) retry.disabled = false;
+            else retry.remove();
+          });
+          async function prepare() {
+            return await getPreview();
+          }
+          const getPreview = async () => {
+            try {
+              const blob = await getAiClipBlob(moment.rank);
+              if (!currentAiJob || state.file !== latestAnalyzedFile) return false;
+              const url = URL.createObjectURL(blob);
+              aiClipUrls.set(moment.rank, url);
+              video.src = url; video.style.display = 'block';
+              download.href = url; download.textContent = 'Download MP4';
+              download.removeAttribute('aria-disabled');
+              share.disabled = false;
+              note.textContent = 'Video ready. Tap Play, Download, or Share.';
+              return true;
+            } catch (e) {
+              note.textContent = 'Retry failed: ' + (e.message || e);
+              return false;
+            }
+          };
+          actions.appendChild(retry);
+          return false;
+        }
+      };
     }
 
     aiAnalyzeBtn.addEventListener('click', async () => {
       if (state.importing || state.busy || aiAnalyzeBtn.disabled) return;
       const file = state.file;
       if (!file) {
-        aiStatus.textContent = 'Select a local video or successfully import a YouTube video first.';
+        aiStatus.textContent = 'Select a video or successfully import one first.';
         return;
       }
       if (!aiRights.checked) {
-        aiStatus.textContent = 'Please confirm permission and consent to temporary backend processing.';
+        aiStatus.textContent = 'Confirm that you have permission and agree to temporary backend processing.';
         return;
       }
       if (file.size > 90 * 1024 * 1024) {
-        aiStatus.textContent = 'AI analysis supports source videos up to 90 MB.';
+        aiStatus.textContent = 'AI video creation supports files up to 90 MB.';
         return;
       }
       const backendURL = ytServer.value.trim().replace(/\/+$/, '');
@@ -1129,51 +1245,64 @@
         if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/')
           throw new Error('bad backend');
       } catch (error) {
-        aiStatus.textContent = 'Enter a valid HTTPS Render backend URL in the YouTube import section.';
+        aiStatus.textContent = 'Enter the HTTPS Render URL in the YouTube import section.';
         return;
       }
       if (key.length < 16) {
-        aiStatus.textContent = 'Enter the private access key in the YouTube import section.';
+        aiStatus.textContent = 'Enter your private access key in the YouTube import section.';
         return;
       }
-      latestAnalyzedFile = null;
+      clearAiClipUI();
       aiAnalyzeBtn.disabled = true;
-      aiResults.replaceChildren();
-      aiStatus.textContent = 'Uploading video to your private Render backend for speech analysis...';
+      aiStatus.textContent = 'Uploading video to your Render backend…';
       try {
         const data = new FormData();
         data.append('file', file, file.name || 'video.mp4');
         data.append('rights_confirmed', 'true');
         const response = await fetch(backendURL + '/api/highlights', {
-          method:'POST', headers:{'X-Clips4U-Key':key}, body:data, cache:'no-store'
+          method: 'POST', headers:{'X-Clips4U-Key': key}, body:data, cache:'no-store'
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(aiResponseError(response, body));
-        if (!body.job_id) throw new Error('Backend did not return an analysis job');
-        aiStatus.textContent = 'Uploaded. Waiting for faster-whisper analysis; keep this page open.';
+        if (!body.job_id) throw new Error('No analysis job returned by backend');
+        aiStatus.textContent = 'Finding the best moments and rendering three videos. Keep this page open.';
         let result = null;
         for (let attempt = 0; attempt < 240; attempt++) {
           await new Promise(resolve => setTimeout(resolve, 3000));
-          const poll = await fetch(backendURL + '/api/highlights/' + encodeURIComponent(body.job_id), {
+          const poll = await fetch(backendURL + '/api/highlights/' +
+            encodeURIComponent(body.job_id), {
             headers:{'X-Clips4U-Key':key}, cache:'no-store'
           });
           const current = await poll.json().catch(() => ({}));
           if (!poll.ok) throw new Error(aiResponseError(poll, current));
-          aiStatus.textContent = 'AI highlight analysis: ' + (current.stage || current.status) + '…';
+          aiStatus.textContent = 'AI video generator: ' + (current.stage || current.status) + '…';
           if (current.status === 'error') throw new Error(current.error || 'Analysis failed');
           if (current.status === 'complete') {
             result = current.result;
             break;
           }
         }
-        if (!result) throw new Error('Analysis is taking too long. Try a shorter video.');
-        if (file !== state.file) throw new Error('The selected video changed. Analyze the new video.');
+        if (!result) throw new Error('Rendering timed out. Try a shorter source.');
+        if (file !== state.file) throw new Error('The selected source changed. Start again.');
+        if (!Array.isArray(result.clips) || !result.clips.length) {
+          throw new Error('No MP4 files returned. Refresh the page and try again.');
+        }
         latestAnalyzedFile = file;
-        (result.highlights || []).forEach(addAiMomentCard);
-        aiStatus.textContent = (result.highlights || []).length + ' speech highlight suggestions ready.' +
-          ' Tap Preview, Use this moment, or Process this clip. ' + (result.note || '');
+        currentAiJob = { id:body.job_id, backendURL, key, file };
+        const preparers = (result.highlights || []).map(addAiMomentCard);
+        let ready = 0;
+        for (let i = 0; i < preparers.length; i++) {
+          aiStatus.textContent = 'Loading iPhone video previews: ' + (i + 1) +
+            ' of ' + preparers.length + '…';
+          if (await preparers[i]()) ready++;
+        }
+        aiStatus.textContent = ready + ' separate MP4 video' + (ready === 1 ? '' : 's') +
+          ' loaded out of ' + result.clips.length +
+          '. Scroll down to watch or save each video. ' +
+          (result.clips.length < 3 ? 'There were not enough distinct spoken moments for 3 clips. ' : '') +
+          'Files expire from the server after one hour.';
       } catch (error) {
-        aiStatus.textContent = 'AI analysis failed: ' + (error.message || error);
+        aiStatus.textContent = 'AI video generation failed: ' + (error.message || error);
       } finally {
         aiAnalyzeBtn.disabled = false;
       }
