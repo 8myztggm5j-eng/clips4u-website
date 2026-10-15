@@ -71,14 +71,14 @@ def video_id_from_url(url: str) -> str:
         raise HTTPException(400, "Could not find a valid 11-character YouTube video ID")
     return value
 
-def checked_run(command: list[str], timeout: int) -> subprocess.CompletedProcess:
+def checked_run(command: list[str], timeout: int, stage: str = 'download') -> subprocess.CompletedProcess:
     # Show a specific, safe error category rather than an unhelpful generic 422.
     # Never log credentials, full command lines or raw stderr to avoid leaks.
     tool = Path(command[0]).name
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
-        logger.warning("import failure category=timeout tool=%s", tool)
+        logger.warning("import failure category=timeout stage=%s tool=%s", stage, tool)
         raise HTTPException(504, "The import timed out. Try a shorter or smaller video.")
 
     if result.returncode == 0:
@@ -106,6 +106,12 @@ def checked_run(command: list[str], timeout: int) -> subprocess.CompletedProcess
     elif "unsupported url" in stderr:
         category = "url_unsupported"
         message = "The video link is not supported by YouTube import."
+    elif "no supported javascript runtime" in stderr or "could not resolve" in stderr and "challenge" in stderr:
+        category = "youtube_player_challenge"
+        message = "The current server cannot process YouTube's video player information. Try an authorized local MP4 copy."
+    elif "unable to extract" in stderr or "no video formats found" in stderr or "only images are available" in stderr:
+        category = "youtube_stream_unavailable"
+        message = "YouTube did not provide a downloadable video stream to this server. Use your original video file or try another public video."
     elif tool in ("ffmpeg", "ffprobe"):
         category = "media_conversion"
         message = "The video was retrieved, but conversion to MP4 failed. Try a shorter original MP4."
@@ -113,7 +119,7 @@ def checked_run(command: list[str], timeout: int) -> subprocess.CompletedProcess
         category = "retrieval_failed"
         message = "YouTube could not provide this video to the hosting server. Cloud-hosted downloads are not always available; try an authorized local video instead."
 
-    logger.warning("import failure category=%s tool=%s exit=%s", category, tool, result.returncode)
+    logger.warning("import failure category=%s stage=%s tool=%s exit=%s", category, stage, tool, result.returncode)
     raise HTTPException(422, message)
 
 def retrieve_public_video(video_id: str) -> bytes:
@@ -124,7 +130,7 @@ def retrieve_public_video(video_id: str) -> bytes:
     with tempfile.TemporaryDirectory(prefix="clips4u_") as temp:
         root = Path(temp)
         # Inspect first so long/livestream videos are rejected before downloading.
-        metadata = checked_run(base + ["--skip-download", "--dump-single-json", video_url], 70)
+        metadata = checked_run(base + ["--skip-download", "--dump-single-json", video_url], 70, stage="metadata")
         try:
             info = json.loads(metadata.stdout)
         except (ValueError, TypeError):
@@ -137,17 +143,18 @@ def retrieve_public_video(video_id: str) -> bytes:
         # Prefer a single mobile-friendly progressive MP4 stream.
         checked_run(base + [
             "--max-filesize", "90M",
-            "-f", "b[ext=mp4][height<=720]/best[ext=mp4][height<=720]/b[height<=720]/best[height<=720]",
+            "-f", "b[ext=mp4][height<=720]/b[height<=720]/bv[height<=720]+ba/bv+ba/best",
+            "--merge-output-format", "mp4",
             "-o", str(root / "source.%(ext)s"),
             video_url
-        ], TIMEOUT_SECONDS)
+        ], TIMEOUT_SECONDS, stage="download")
         candidates = [p for p in root.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl"))]
         if len(candidates) != 1:
             raise HTTPException(422, "Could not prepare a single video file")
         source = candidates[0]
         if source.stat().st_size > MAX_BYTES:
             raise HTTPException(413, "Video is over the 90 MB import limit")
-        details = checked_run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(source)], 20)
+        details = checked_run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(source)], 20, stage="probe")
         streams = json.loads(details.stdout).get("streams", [])
         video = next((x for x in streams if x.get("codec_type") == "video"), None)
         audio = next((x for x in streams if x.get("codec_type") == "audio"), None)
@@ -165,7 +172,7 @@ def retrieve_public_video(video_id: str) -> bytes:
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
                 "-movflags", "+faststart", str(target)
-            ], TIMEOUT_SECONDS)
+            ], TIMEOUT_SECONDS, stage="transcode")
             if not target.exists() or target.stat().st_size > MAX_BYTES:
                 raise HTTPException(413, "Converted video exceeds the 90 MB import limit")
             payload = target.read_bytes()
