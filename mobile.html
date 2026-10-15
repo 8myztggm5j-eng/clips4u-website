@@ -458,12 +458,14 @@
           <div style="margin-bottom:14px;">
             <label class="label-row" for="aiVideoLayout">Automatic clip layout</label>
             <select id="aiVideoLayout">
-              <option value="blur" selected>Full video + matching blurred background</option>
-              <option value="crop">Fill 9:16 screen (center crop)</option>
+              <option value="portrait_blur" selected>Portrait main video + matching blurred background</option>
+              <option value="blur">Keep full horizontal video + matching blur</option>
+              <option value="crop">Portrait center crop (no blur)</option>
             </select>
             <p style="font-size:.86rem;color:var(--muted);margin:8px 0 0;">
-              Blurred background uses the same footage, synchronized with the sharp video in front.
-              This keeps the entire horizontal shot visible without cutting off the sides.
+              Portrait + blur makes the sharp foreground tall (9:16), with a matching blurred
+              border behind it. Wide source videos are cropped at the sides. Choose "Keep full
+              horizontal video" if you need the entire original shot preserved.
             </p>
           </div>
           <div style="margin-bottom:14px;">
@@ -484,7 +486,7 @@
             <span>Burn automatic speech captions onto videos</span>
           </label>
           <button class="button" id="aiAnalyzeBtn" type="button" style="width:100%;">Generate Highlight Videos</button>
-          <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. AI clips default to the matching blurred-background layout.</div>
+          <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. The AI main video now defaults to portrait + blurred background.</div>
           <div id="aiResults" style="display:grid;gap:12px;margin-top:12px;"></div>
         </div>
         <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet videos may produce fewer distinct clips than requested. Choose 540p, 1080p, or experimental vertical 4K. Higher resolutions take longer and use more memory on Render. On the 512 MB free plan, start with 1 clip at 15 seconds and 540p. Captions are synchronized to recognized speech and can contain transcription errors. YouTube's existing import bot check is unchanged.</div>
@@ -1346,7 +1348,8 @@
         aiStatus.textContent = 'Finding ' + clipCount + ' highlight moments and rendering ' +
           clipLength + '-second ' + outputQuality.toUpperCase() + ' videos' +
           (captionsEnabled ? ' with captions' : '') +
-          (videoLayout === 'blur' ? ' and a matching blurred background' : ' with center crop') +
+          (videoLayout === 'portrait_blur' ? ' with a portrait main video and matching blur' :
+            videoLayout === 'blur' ? ' with full horizontal video and blur' : ' with full-screen center crop') +
           '. Keep this page open.';
         let result = null;
         for (let attempt = 0; attempt < 240; attempt++) {
@@ -1384,7 +1387,8 @@
           ' loaded out of ' + result.clips.length +
           ' requested ' + clipCount + ' (' + (result.output_quality || outputQuality).toUpperCase() +
           ' · ' + result.width + '×' + result.height +
-          ' · ' + (result.video_layout === 'blur' ? 'matching blurred background' : 'center crop') +
+          ' · ' + (result.video_layout === 'portrait_blur' ? 'portrait front + matching blur' :
+            result.video_layout === 'blur' ? 'full-width front + matching blur' : 'center crop') +
           '). Scroll down to watch or save each video. ' +
           (result.clips.length < clipCount ? 'There were not enough distinct spoken moments for all requested clips. ' : '') +
           (captionsEnabled ? 'Captions are burned into the MP4s. ' : '') +
