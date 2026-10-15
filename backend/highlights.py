@@ -195,11 +195,12 @@ def write_caption_file(words: list[dict], start: float, end: float, target: Path
 
 
 def render_vertical_mp4(source_path: str, target: Path, start: float, end: float,
-                        subtitle_path: Path | None, output_quality: str = "540p") -> None:
-    """Render a standard/HD/4K vertical MP4 from the original video, not the 540p preview.
+                        subtitle_path: Path | None, output_quality: str = "540p",
+                        video_layout: str = "blur") -> None:
+    """Compose matching blurred background + sharp fitted foreground, or center-crop.
 
-    4K is a resolution upscale using Lanczos resampling, not AI super-resolution.
-    Keep x264 at one thread in 4K mode to lower memory use on Render.
+    Both layers derive from the same source video frame using FFmpeg split, so
+    they always stay synchronized. All output formats are vertical 9:16.
     """
     seconds = round(end - start, 2)
     if not 0 < seconds <= 61:
@@ -207,13 +208,10 @@ def render_vertical_mp4(source_path: str, target: Path, start: float, end: float
     if output_quality not in OUTPUT_SIZES:
         raise ValueError("Unsupported output quality")
     width, height = OUTPUT_SIZES[output_quality]
-    filters = [
-        f"scale={width}:{height}:flags=lanczos:force_original_aspect_ratio=increase",
-        f"crop={width}:{height}", "setsar=1", "fps=24"
-    ]
-    if output_quality == "4k":
-        # Gentle sharpening after upscaling; cannot restore lost detail.
-        filters.append("unsharp=5:5:0.35:5:5:0.0")
+    if video_layout not in ("blur", "crop"):
+        raise ValueError("Unsupported video layout")
+    is_4k = output_quality == "4k"
+    style = None
     if subtitle_path:
         factor = width / 540
         style = (
@@ -222,33 +220,70 @@ def render_vertical_mp4(source_path: str, target: Path, start: float, end: float
             f"BorderStyle=1,Outline={round(3 * factor)},Shadow={round(factor)},"
             f"Alignment=2,MarginV={round(130 * factor)}"
         )
-        filters.append(f"subtitles=filename='{subtitle_path}':force_style='{style}'")
-    is_4k = output_quality == "4k"
+    subtitle_filter = (
+        f"subtitles=filename='{subtitle_path}':force_style='{style}'"
+        if subtitle_path else None
+    )
+
+    if video_layout == "blur":
+        # Match the manual mobile '9:16 vertical + blur' layout: the blurred
+        # full-frame background and fitted foreground show the SAME instant.
+        # Blur a small background and enlarge it later to conserve 4K RAM.
+        foreground_width = int(width * 0.88) // 2 * 2
+        foreground_height = int(height * 0.88) // 2 * 2
+        graph = (
+            "[0:v]fps=24,split=2[bgsrc][fgsrc];"
+            "[bgsrc]scale=270:480:force_original_aspect_ratio=increase,"
+            f"crop=270:480,boxblur=18:2,scale={width}:{height}:flags=bicubic,"
+            "setsar=1[bg];"
+            f"[fgsrc]scale={foreground_width}:{foreground_height}:"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2:"
+            "flags=lanczos,setsar=1[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto,format=yuv420p"
+        )
+        if subtitle_filter:
+            graph += f",{subtitle_filter}"
+        graph += "[vout]"
+        filter_args = ["-filter_complex", graph, "-map", "[vout]"]
+    else:
+        filters = [
+            f"scale={width}:{height}:flags=lanczos:force_original_aspect_ratio=increase",
+            f"crop={width}:{height}", "setsar=1", "fps=24"
+        ]
+        if is_4k:
+            filters.append("unsharp=5:5:0.35:5:5:0.0")
+        if subtitle_filter:
+            filters.append(subtitle_filter)
+        filter_args = ["-vf", ",".join(filters), "-map", "0:v:0"]
+
     try:
-        result = subprocess.run([
+        cmd = [
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-filter_threads", "1", "-y", "-ss", str(start), "-i", source_path,
-            "-t", str(seconds), "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", ",".join(filters),
-            "-c:v", "libx264", "-preset", "ultrafast",
+            "-filter_threads", "1", "-filter_complex_threads", "1",
+            "-y", "-ss", str(start), "-i", source_path, "-t", str(seconds)
+        ]
+        cmd.extend(filter_args)
+        cmd.extend([
+            "-map", "0:a:0?", "-c:v", "libx264", "-preset", "ultrafast",
             "-tune", "zerolatency", "-crf", "31" if is_4k else "28",
             "-threads", "1" if is_4k else "2", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "96k",
-            "-movflags", "+faststart", str(target)
-        ], capture_output=True, timeout=480 if is_4k else 240)
+            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(target)
+        ])
+        result = subprocess.run(cmd, capture_output=True,
+                                timeout=480 if is_4k else 240)
     except subprocess.TimeoutExpired as exc:
-        raise ValueError("4K took too long on the current server. Try 1080p or a shorter clip.") from exc
+        raise ValueError("Rendering took too long on this server. Try 540p or shorter clips.") from exc
     if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
-        logger.warning("clip rendering failed stage=ffmpeg exit=%s captions=%s quality=%s",
-                       result.returncode, bool(subtitle_path), output_quality)
-        raise ValueError("Video rendering failed. 4K needs more memory and CPU than Render may provide; try 1080p or 540p.")
+        logger.warning("clip rendering failed stage=ffmpeg exit=%s captions=%s quality=%s layout=%s",
+                       result.returncode, bool(subtitle_path), output_quality, video_layout)
+        raise ValueError("Video rendering failed. Try 540p, fewer clips, or turn captions off.")
     if target.stat().st_size > MAX_BYTES:
         raise ValueError("The rendered clip exceeded 90 MB. Choose a lower quality or shorter length.")
 
 
 def analyze(job_id: str, folder: str, source_path: str,
             clip_count: int, clip_length: int, captions: bool,
-            output_quality: str = "540p") -> None:
+            output_quality: str = "540p", video_layout: str = "blur") -> None:
     global ACTIVE_JOB
     job = JOBS[job_id]
     try:
@@ -301,13 +336,14 @@ def analyze(job_id: str, folder: str, source_path: str,
                 else:
                     raise ValueError("No recognizable words to caption. Try again with captions turned off.")
             render_vertical_mp4(source_path, output_path, highlight["start"], highlight["end"],
-                                subtitle_path, output_quality)
+                                subtitle_path, output_quality, video_layout)
             if subtitle_path:
                 subtitle_path.unlink(missing_ok=True)
             clips.append({"rank": i, "filename": f"clips4u-highlight-{i}.mp4",
                           "bytes": output_path.stat().st_size, "captions": captions,
                           "width": OUTPUT_SIZES[output_quality][0],
-                          "height": OUTPUT_SIZES[output_quality][1]})
+                          "height": OUTPUT_SIZES[output_quality][1],
+                          "video_layout": video_layout})
         # Retain only the short finished clips temporarily; discard source/audio
         # before notifying the iPhone that all exports are available.
         Path(source_path).unlink(missing_ok=True)
@@ -321,11 +357,12 @@ def analyze(job_id: str, folder: str, source_path: str,
             "clip_length_seconds": clip_length,
             "captions": captions,
             "output_quality": output_quality,
+            "video_layout": video_layout,
             "width": OUTPUT_SIZES[output_quality][0],
             "height": OUTPUT_SIZES[output_quality][1],
             "language": language,
             "method": "faster-whisper transcription + speech-content scoring",
-            "note": "Videos are 9:16 MP4s selected using speech. 4K is resolution upscaling (not AI detail restoration). Some moments can overlap."
+            "note": "Blur layout uses synchronized sharp and blurred copies of the same video. 4K is resolution upscaling, not AI detail restoration."
         }, updated=time.time())
         # Clear temporary exported files even if no more API requests arrive.
         expiration = Timer(EXPIRE_SECONDS + 60, cleanup_jobs)
@@ -353,6 +390,7 @@ async def start_highlights(
     clip_length: int = Form(30),
     captions: bool = Form(True),
     output_quality: str = Form("540p"),
+    video_layout: str = Form("blur"),
     x_clips4u_key: str | None = Header(default=None),
 ):
     global ACTIVE_JOB
@@ -365,6 +403,8 @@ async def start_highlights(
         raise HTTPException(400, "Choose a clip length of 15, 20, 30, 45 or 60 seconds")
     if output_quality not in OUTPUT_SIZES:
         raise HTTPException(400, "Choose 540p, 1080p or 4k output quality")
+    if video_layout not in ("blur", "crop"):
+        raise HTTPException(400, "Choose blurred background or center crop")
     cleanup_jobs()
     if ACTIVE_JOB is not None:
         raise HTTPException(429, "Another highlight analysis is underway. Try again shortly.")
@@ -392,7 +432,8 @@ async def start_highlights(
     JOBS[job_id] = {"status": "queued", "stage": "Waiting to analyze", "updated": time.time()}
     ACTIVE_JOB = job_id
     background_tasks.add_task(analyze, job_id, folder, str(dest),
-                              clip_count, clip_length, captions, output_quality)
+                              clip_count, clip_length, captions, output_quality,
+                              video_layout)
     return {"job_id": job_id, "status": "queued"}
 
 
