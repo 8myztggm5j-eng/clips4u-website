@@ -456,6 +456,17 @@
             </div>
           </div>
           <div style="margin-bottom:14px;">
+            <label class="label-row" for="aiVideoLayout">Automatic clip layout</label>
+            <select id="aiVideoLayout">
+              <option value="blur" selected>Full video + matching blurred background</option>
+              <option value="crop">Fill 9:16 screen (center crop)</option>
+            </select>
+            <p style="font-size:.86rem;color:var(--muted);margin:8px 0 0;">
+              Blurred background uses the same footage, synchronized with the sharp video in front.
+              This keeps the entire horizontal shot visible without cutting off the sides.
+            </p>
+          </div>
+          <div style="margin-bottom:14px;">
             <label class="label-row" for="aiClipQuality">Finished video resolution</label>
             <select id="aiClipQuality">
               <option value="540p" selected>Standard — 540 × 960 (fastest)</option>
@@ -473,7 +484,7 @@
             <span>Burn automatic speech captions onto videos</span>
           </label>
           <button class="button" id="aiAnalyzeBtn" type="button" style="width:100%;">Generate Highlight Videos</button>
-          <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. Uses the same backend URL and access key as YouTube import.</div>
+          <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. AI clips default to the matching blurred-background layout.</div>
           <div id="aiResults" style="display:grid;gap:12px;margin-top:12px;"></div>
         </div>
         <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet videos may produce fewer distinct clips than requested. Choose 540p, 1080p, or experimental vertical 4K. Higher resolutions take longer and use more memory on Render. Captions are synchronized to recognized speech and can contain transcription errors. YouTube's existing import bot check is unchanged.</div>
@@ -1085,6 +1096,7 @@
     const aiClipLength = document.getElementById('aiClipLength');
     const aiCaptions = document.getElementById('aiCaptions');
     const aiClipQuality = document.getElementById('aiClipQuality');
+    const aiVideoLayout = document.getElementById('aiVideoLayout');
     let latestAnalyzedFile = null;
     let currentAiJob = null;
     const aiClipBlobs = new Map();
@@ -1293,6 +1305,7 @@
       const clipLength = Number(aiClipLength.value);
       const captionsEnabled = aiCaptions.checked;
       const outputQuality = aiClipQuality.value;
+      const videoLayout = aiVideoLayout.value;
       if (outputQuality === '4k' && !window.confirm(
           '4K upscale can be very slow and may run out of resources on this free Render server. ' +
           'It makes a 2160 × 3840 video but cannot restore detail missing from the source. Try 4K?')) {
@@ -1321,6 +1334,7 @@
         data.append('clip_length', String(clipLength));
         data.append('captions', String(captionsEnabled));
         data.append('output_quality', outputQuality);
+        data.append('video_layout', videoLayout);
         const response = await fetch(backendURL + '/api/highlights', {
           method: 'POST', headers:{'X-Clips4U-Key': key}, body:data, cache:'no-store'
         });
@@ -1330,6 +1344,7 @@
         aiStatus.textContent = 'Finding ' + clipCount + ' highlight moments and rendering ' +
           clipLength + '-second ' + outputQuality.toUpperCase() + ' videos' +
           (captionsEnabled ? ' with captions' : '') +
+          (videoLayout === 'blur' ? ' and a matching blurred background' : ' with center crop') +
           '. Keep this page open.';
         let result = null;
         for (let attempt = 0; attempt < 240; attempt++) {
@@ -1366,6 +1381,7 @@
           ' loaded out of ' + result.clips.length +
           ' requested ' + clipCount + ' (' + (result.output_quality || outputQuality).toUpperCase() +
           ' · ' + result.width + '×' + result.height +
+          ' · ' + (result.video_layout === 'blur' ? 'matching blurred background' : 'center crop') +
           '). Scroll down to watch or save each video. ' +
           (result.clips.length < clipCount ? 'There were not enough distinct spoken moments for all requested clips. ' : '') +
           (captionsEnabled ? 'Captions are burned into the MP4s. ' : '') +
