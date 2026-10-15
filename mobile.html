@@ -1122,7 +1122,7 @@
         aiStatus.textContent = 'AI analysis supports source videos up to 90 MB.';
         return;
       }
-      const backendURL = ytServer.value.trim().replace(/\\/+$/, '');
+      const backendURL = ytServer.value.trim().replace(/\/+$/, '');
       const key = ytKey.value.trim();
       try {
         const url = new URL(backendURL);
