@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 import re
 import subprocess
@@ -30,6 +31,8 @@ MAX_BYTES = 90 * 1024 * 1024
 TIMEOUT_SECONDS = 200
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 lock = asyncio.Lock()
+logger = logging.getLogger('clips4u.import')
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,14 +72,49 @@ def video_id_from_url(url: str) -> str:
     return value
 
 def checked_run(command: list[str], timeout: int) -> subprocess.CompletedProcess:
+    # Show a specific, safe error category rather than an unhelpful generic 422.
+    # Never log credentials, full command lines or raw stderr to avoid leaks.
+    tool = Path(command[0]).name
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
-        raise HTTPException(504, "YouTube retrieval took too long. Try a shorter video.")
-    if result.returncode != 0:
-        # Do not expose internal paths, keys, cookies, or command output to the visitor.
-        raise HTTPException(422, "YouTube could not provide this video. It may be restricted, blocked from cloud hosting, or unavailable.")
-    return result
+        logger.warning("import failure category=timeout tool=%s", tool)
+        raise HTTPException(504, "The import timed out. Try a shorter or smaller video.")
+
+    if result.returncode == 0:
+        return result
+
+    stderr = (result.stderr or "").lower()
+    if "sign in to confirm you're not a bot" in stderr or "confirm you’re not a bot" in stderr:
+        category = "youtube_bot_check"
+        message = "YouTube requires verification from this hosting server. This cannot be solved by the private access key. Import your own original video using Select local video instead."
+    elif "sign in" in stderr or "login required" in stderr or "age-restricted" in stderr or "members-only" in stderr:
+        category = "youtube_login_required"
+        message = "YouTube requires a sign-in or restricts this video. Private, age-restricted and member-only videos are not supported. Use your authorized local copy."
+    elif "requested format is not available" in stderr or "requested format is unavailable" in stderr:
+        category = "format_unavailable"
+        message = "YouTube does not offer a compatible video stream for this link. Try another public video or import your original MP4."
+    elif "video unavailable" in stderr or "this video is unavailable" in stderr:
+        category = "video_unavailable"
+        message = "YouTube reports that this video is unavailable from the server."
+    elif "http error 403" in stderr or "forbidden" in stderr:
+        category = "youtube_forbidden"
+        message = "YouTube rejected this server's video request (403). Use an authorized local copy instead."
+    elif "http error 429" in stderr or "too many requests" in stderr:
+        category = "youtube_rate_limit"
+        message = "YouTube temporarily limited requests from this server. Wait before trying again."
+    elif "unsupported url" in stderr:
+        category = "url_unsupported"
+        message = "The video link is not supported by YouTube import."
+    elif tool in ("ffmpeg", "ffprobe"):
+        category = "media_conversion"
+        message = "The video was retrieved, but conversion to MP4 failed. Try a shorter original MP4."
+    else:
+        category = "retrieval_failed"
+        message = "YouTube could not provide this video to the hosting server. Cloud-hosted downloads are not always available; try an authorized local video instead."
+
+    logger.warning("import failure category=%s tool=%s exit=%s", category, tool, result.returncode)
+    raise HTTPException(422, message)
 
 def retrieve_public_video(video_id: str) -> bytes:
     video_url = "https://www.youtube.com/watch?v=" + video_id
