@@ -405,6 +405,23 @@
         </div>
       </section>
 
+      <section class="panel" id="youtubeImportPanel">
+        <h2 style="margin:0 0 8px;">Import a YouTube video link</h2>
+        <p class="lede">For public videos you own or have permission to reuse. Requires your private Clips4U import server.</p>
+        <div class="controls-grid" style="margin-top:12px;">
+          <div><label class="label-row" for="ytLink">YouTube video link</label>
+          <input id="ytLink" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=..." style="width:100%;min-height:46px;background:#071426;color:white;border:1px solid var(--line);border-radius:12px;padding:10px;"></div>
+          <div><label class="label-row" for="ytServer">Backend URL (from Render)</label>
+          <input id="ytServer" type="url" inputmode="url" placeholder="https://your-service.onrender.com" style="width:100%;min-height:46px;background:#071426;color:white;border:1px solid var(--line);border-radius:12px;padding:10px;"></div>
+          <div><label class="label-row" for="ytKey">Private access key</label>
+          <input id="ytKey" type="password" autocomplete="off" placeholder="Private key configured in Render" style="width:100%;min-height:46px;background:#071426;color:white;border:1px solid var(--line);border-radius:12px;padding:10px;"></div>
+          <label style="display:flex;gap:10px;color:var(--muted);font-size:.9rem;"><input id="ytRights" type="checkbox" style="width:20px;height:20px;flex:0 0 auto;accent-color:var(--blue);"><span>I own this video or have permission to download and edit it.</span></label>
+          <button class="button" id="ytImportBtn" type="button">Import YouTube video</button>
+          <div class="meta" id="ytImportStatus" role="status" aria-live="polite">Connect your backend to import public videos up to 10 minutes and 90 MB.</div>
+        </div>
+        <div class="info-note">Your local video picker still works without the backend. Cloud servers may be blocked from downloading some YouTube videos.</div>
+      </section>
+
       <section class="panel">
         <div class="controls-grid">
           <div class="control-box">
@@ -506,7 +523,8 @@
       processingClipDuration: 0,
       busy: false,
       previewing: false,
-      workerObjectUrl: null
+      workerObjectUrl: null,
+      importing: false
     };
 
     const sourceVideo = document.getElementById('sourceVideo');
@@ -854,11 +872,8 @@
       return (name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.m4v') || name.endsWith('.webm') || name.endsWith('.mkv'));
     }
 
-    function handleFileSelection(event) {
-      if (state.busy) return;
-      const file = event.target.files && event.target.files[0];
-      if (!file) return;
-
+    function loadSelectedVideo(file) {
+      if (state.busy || !file) return;
       if (!looksLikeVideoFile(file)) {
         setStatus('Please choose a valid video file (mp4, mov, m4v, webm, mkv).', 'error');
         return;
@@ -909,6 +924,96 @@
       progressBar.style.width = '0%';
       videoInput.value = ''; // permit reselecting same video
     }
+
+    function handleFileSelection(event) {
+      loadSelectedVideo(event.target.files && event.target.files[0]);
+    }
+
+    const ytLink = document.getElementById('ytLink');
+    const ytServer = document.getElementById('ytServer');
+    const ytKey = document.getElementById('ytKey');
+    const ytRights = document.getElementById('ytRights');
+    const ytImportBtn = document.getElementById('ytImportBtn');
+    const ytImportStatus = document.getElementById('ytImportStatus');
+    try {
+      ytServer.value = localStorage.getItem('clips4uImportServer') || '';
+      ytKey.value = sessionStorage.getItem('clips4uImportSessionKey') || '';
+    } catch (e) {}
+
+    ytImportBtn.addEventListener('click', async () => {
+      if (state.busy || state.importing) return;
+      const youtubeURL = ytLink.value.trim();
+      const backendURL = ytServer.value.trim().replace(/\/+$/, '');
+      const key = ytKey.value.trim();
+      try {
+        const backend = new URL(backendURL);
+        if (backend.protocol !== 'https:' || backend.username || backend.password || backend.pathname !== '/') {
+          throw new Error('Invalid backend URL');
+        }
+      } catch (e) {
+        ytImportStatus.textContent = 'Enter the Render HTTPS service URL without /api/import.';
+        return;
+      }
+      try {
+        const inputURL = new URL(youtubeURL);
+        const host = inputURL.hostname.toLowerCase();
+        if (inputURL.protocol !== 'https:' || !['youtube.com','www.youtube.com','m.youtube.com','youtu.be','www.youtu.be'].includes(host)) {
+          throw new Error('Invalid YouTube URL');
+        }
+      } catch (e) {
+        ytImportStatus.textContent = 'Paste a complete YouTube watch, Shorts or youtu.be URL.';
+        return;
+      }
+      if (key.length < 16) {
+        ytImportStatus.textContent = 'Enter your private access key from the Render environment.';
+        return;
+      }
+      if (!ytRights.checked) {
+        ytImportStatus.textContent = 'Confirm that you own or have permission to reuse this video.';
+        return;
+      }
+
+      state.importing = true;
+      ytImportBtn.disabled = true;
+      processBtn.disabled = true;
+      videoInput.disabled = true;
+      ytImportStatus.textContent = 'Retrieving the YouTube video. This may take a few minutes. Keep this tab open.';
+      try {
+        try {
+          localStorage.setItem('clips4uImportServer', backendURL);
+          sessionStorage.setItem('clips4uImportSessionKey', key);
+        } catch (e) {}
+        const response = await fetch(backendURL + '/api/import', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json', 'X-Clips4U-Key':key},
+          body: JSON.stringify({url:youtubeURL,rights_confirmed:true}),
+          cache: 'no-store'
+        });
+        if (!response.ok) {
+          let reason = 'HTTP ' + response.status;
+          try {
+            const errorBody = await response.json();
+            if (errorBody.detail) reason = errorBody.detail;
+          } catch (e) {}
+          throw new Error(reason);
+        }
+        const declared = Number(response.headers.get('Content-Length') || 0);
+        if (declared > 95 * 1024 * 1024) throw new Error('Video exceeds the mobile import size limit');
+        const blob = await response.blob();
+        if (!blob.size || blob.size > 95 * 1024 * 1024) throw new Error('Video was empty or too large');
+        const file = new File([blob], 'clips4u-youtube-import.mp4', {type:'video/mp4'});
+        loadSelectedVideo(file);
+        ytImportStatus.textContent = 'Import complete! Set start/end times and Process clip.';
+        ytLink.value = '';
+      } catch (error) {
+        ytImportStatus.textContent = 'Import failed: ' + (error.message || error) + '. YouTube may block cloud servers; local file import is always available.';
+      } finally {
+        state.importing = false;
+        ytImportBtn.disabled = false;
+        processBtn.disabled = false;
+        videoInput.disabled = false;
+      }
+    });
 
     function setClipStartToCurrent() {
       if (!state.file) {
