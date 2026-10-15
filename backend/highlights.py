@@ -298,12 +298,15 @@ def analyze(job_id: str, folder: str, source_path: str,
         ], capture_output=True, timeout=100)
         if result.returncode or not audio_path.is_file():
             raise ValueError("Could not read an audio track. This feature needs speech in the video.")
-        job.update(stage="Transcribing with faster-whisper (first run may load the model)", updated=time.time())
+        job.update(stage="Transcribing speech with low-memory faster-whisper", updated=time.time())
         from faster_whisper import WhisperModel
-        model = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=2,
-                             num_workers=1, download_root="/tmp/clips4u-whisper-model")
-        segments, info = model.transcribe(str(audio_path), beam_size=1, word_timestamps=True,
-                                          vad_filter=True, condition_on_previous_text=False)
+        # Render Free: 512 MiB. Use preloaded local tiny model and avoid loading
+        # a second ONNX voice-activity-detection model that can cause an OOM kill.
+        model = WhisperModel("/opt/clips4u-models/tiny", device="cpu",
+                             compute_type="int8", cpu_threads=1, num_workers=1)
+        segments, info = model.transcribe(str(audio_path), beam_size=1, best_of=1,
+                                          word_timestamps=True, vad_filter=False,
+                                          condition_on_previous_text=False)
         words = []
         for segment in segments:
             if segment.words:
