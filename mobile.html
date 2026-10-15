@@ -455,6 +455,19 @@
               </select>
             </div>
           </div>
+          <div style="margin-bottom:14px;">
+            <label class="label-row" for="aiClipQuality">Finished video resolution</label>
+            <select id="aiClipQuality">
+              <option value="540p" selected>Standard — 540 × 960 (fastest)</option>
+              <option value="1080p">Full HD — 1080 × 1920</option>
+              <option value="4k">4K upscale — 2160 × 3840 (experimental)</option>
+            </select>
+            <p style="font-size:.86rem;color:var(--muted);margin:8px 0 0;">
+              4K enlarges the original video's pixels using high-quality scaling. It does not
+              invent missing detail. 4K can be very slow or fail on the free Render server;
+              1080p is recommended for reliable uploads.
+            </p>
+          </div>
           <label class="radio" style="margin-bottom:14px;">
             <input id="aiCaptions" type="checkbox" checked>
             <span>Burn automatic speech captions onto videos</span>
@@ -463,7 +476,7 @@
           <div class="meta" id="aiStatus" role="status" aria-live="polite">Choose a video above, then start analysis. Uses the same backend URL and access key as YouTube import.</div>
           <div id="aiResults" style="display:grid;gap:12px;margin-top:12px;"></div>
         </div>
-        <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet videos may produce fewer distinct clips than requested. Finished clips are rendered in 9:16 (540p) by Render and may take several minutes. Captions are synchronized to recognized speech and can contain transcription errors. YouTube's existing import bot check is unchanged.</div>
+        <div class="info-note">The AI uses faster-whisper speech transcription, not visual action analysis. Short or quiet videos may produce fewer distinct clips than requested. Choose 540p, 1080p, or experimental vertical 4K. Higher resolutions take longer and use more memory on Render. Captions are synchronized to recognized speech and can contain transcription errors. YouTube's existing import bot check is unchanged.</div>
       </section>
 
       <section class="panel">
@@ -1071,6 +1084,7 @@
     const aiClipCount = document.getElementById('aiClipCount');
     const aiClipLength = document.getElementById('aiClipLength');
     const aiCaptions = document.getElementById('aiCaptions');
+    const aiClipQuality = document.getElementById('aiClipQuality');
     let latestAnalyzedFile = null;
     let currentAiJob = null;
     const aiClipBlobs = new Map();
@@ -1170,7 +1184,8 @@
       const download = document.createElement('a');
       download.className = 'secondary-button';
       download.textContent = 'Preparing MP4…';
-      download.download = 'clips4u-highlight-' + moment.rank + '.mp4';
+      download.download = 'clips4u-highlight-' + moment.rank + '-' +
+        (moment.output_quality || '540p') + '.mp4';
       download.setAttribute('aria-disabled','true');
       const customize = document.createElement('button');
       customize.type = 'button';
@@ -1188,7 +1203,8 @@
         }
         try {
           const blob = await getAiClipBlob(moment.rank);
-          const filename = 'clips4u-highlight-' + moment.rank + '.mp4';
+          const filename = 'clips4u-highlight-' + moment.rank + '-' +
+            (moment.output_quality || '540p') + '.mp4';
           const file = new File([blob], filename, {type:'video/mp4'});
           if (navigator.share && (!navigator.canShare || navigator.canShare({files:[file]}))) {
             await navigator.share({files:[file], title:filename});
@@ -1276,6 +1292,12 @@
       const clipCount = Number(aiClipCount.value);
       const clipLength = Number(aiClipLength.value);
       const captionsEnabled = aiCaptions.checked;
+      const outputQuality = aiClipQuality.value;
+      if (outputQuality === '4k' && !window.confirm(
+          '4K upscale can be very slow and may run out of resources on this free Render server. ' +
+          'It makes a 2160 × 3840 video but cannot restore detail missing from the source. Try 4K?')) {
+        return;
+      }
       try {
         const url = new URL(backendURL);
         if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/')
@@ -1298,6 +1320,7 @@
         data.append('clip_count', String(clipCount));
         data.append('clip_length', String(clipLength));
         data.append('captions', String(captionsEnabled));
+        data.append('output_quality', outputQuality);
         const response = await fetch(backendURL + '/api/highlights', {
           method: 'POST', headers:{'X-Clips4U-Key': key}, body:data, cache:'no-store'
         });
@@ -1305,7 +1328,8 @@
         if (!response.ok) throw new Error(aiResponseError(response, body));
         if (!body.job_id) throw new Error('No analysis job returned by backend');
         aiStatus.textContent = 'Finding ' + clipCount + ' highlight moments and rendering ' +
-          clipLength + '-second videos' + (captionsEnabled ? ' with captions' : '') +
+          clipLength + '-second ' + outputQuality.toUpperCase() + ' videos' +
+          (captionsEnabled ? ' with captions' : '') +
           '. Keep this page open.';
         let result = null;
         for (let attempt = 0; attempt < 240; attempt++) {
@@ -1329,8 +1353,9 @@
           throw new Error('No MP4 files returned. Refresh the page and try again.');
         }
         latestAnalyzedFile = file;
-        currentAiJob = { id:body.job_id, backendURL, key, file };
-        const preparers = (result.highlights || []).map(addAiMomentCard);
+        currentAiJob = { id:body.job_id, backendURL, key, file, quality: result.output_quality };
+        const preparers = (result.highlights || []).map(moment =>
+          addAiMomentCard({...moment, output_quality: result.output_quality}));
         let ready = 0;
         for (let i = 0; i < preparers.length; i++) {
           aiStatus.textContent = 'Loading iPhone video previews: ' + (i + 1) +
@@ -1339,7 +1364,9 @@
         }
         aiStatus.textContent = ready + ' separate MP4 video' + (ready === 1 ? '' : 's') +
           ' loaded out of ' + result.clips.length +
-          ' requested ' + clipCount + '. Scroll down to watch or save each video. ' +
+          ' requested ' + clipCount + ' (' + (result.output_quality || outputQuality).toUpperCase() +
+          ' · ' + result.width + '×' + result.height +
+          '). Scroll down to watch or save each video. ' +
           (result.clips.length < clipCount ? 'There were not enough distinct spoken moments for all requested clips. ' : '') +
           (captionsEnabled ? 'Captions are burned into the MP4s. ' : '') +
           'Files expire from the server after one hour.';
