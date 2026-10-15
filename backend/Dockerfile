@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r re
 # This avoids Hugging Face downloads and temporary load spikes during requests.
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Systran/faster-whisper-tiny', local_dir='/opt/clips4u-models/tiny', allow_patterns=['model.bin','config.json','tokenizer.json','vocabulary.json','preprocessor_config.json'])"
 ENV OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false HF_HUB_OFFLINE=1
+# Verify the CTranslate2 model opens on the same Debian image used in production.
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('/opt/clips4u-models/tiny', device='cpu', compute_type='int8', cpu_threads=1, num_workers=1); print('Whisper model load verified')"
 COPY app.py /app/app.py
 COPY highlights.py /app/highlights.py
 EXPOSE 10000
