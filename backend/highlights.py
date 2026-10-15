@@ -4,8 +4,9 @@ they are not predictions of reach or evidence of copyright permission.
 """
 from __future__ import annotations
 
-import gc
 import hmac
+import json
+import sys
 import logging
 import os
 import re
@@ -298,30 +299,31 @@ def analyze(job_id: str, folder: str, source_path: str,
         ], capture_output=True, timeout=100)
         if result.returncode or not audio_path.is_file():
             raise ValueError("Could not read an audio track. This feature needs speech in the video.")
-        job.update(stage="Transcribing speech with low-memory faster-whisper", updated=time.time())
-        from faster_whisper import WhisperModel
-        # Render Free: 512 MiB. Use preloaded local tiny model and avoid loading
-        # a second ONNX voice-activity-detection model that can cause an OOM kill.
-        model = WhisperModel("/opt/clips4u-models/tiny", device="cpu",
-                             compute_type="int8", cpu_threads=1, num_workers=1)
-        segments, info = model.transcribe(str(audio_path), beam_size=1, best_of=1,
-                                          word_timestamps=True, vad_filter=False,
-                                          condition_on_previous_text=False)
-        words = []
-        for segment in segments:
-            if segment.words:
-                for word in segment.words:
-                    if word.word.strip() and word.end is not None and word.start is not None:
-                        words.append({"start": float(word.start), "end": float(word.end), "text": word.word})
-            elif segment.text.strip():
-                words.append({"start": float(segment.start), "end": float(segment.end), "text": segment.text.strip()})
+        job.update(stage="Transcribing speech in a separate low-memory process", updated=time.time())
+        # The worker exits immediately after transcription. Only then does FFmpeg
+        # render the video, so their memory demands never overlap on Render Free.
+        transcript_path = Path(folder) / "transcript.json"
+        logger.info("highlights stage=transcription_started job=%s", job_id[:8])
+        try:
+            speech = subprocess.run([
+                sys.executable, "/app/transcribe_worker.py",
+                str(audio_path), str(transcript_path)
+            ], capture_output=True, timeout=480)
+        except subprocess.TimeoutExpired as exc:
+            logger.warning("highlights stage=transcription_timeout job=%s", job_id[:8])
+            raise ValueError("Speech transcription took too long. Try a shorter source video.") from exc
+        if speech.returncode or not transcript_path.exists():
+            logger.warning("highlights stage=transcription_failed exit=%s job=%s",
+                           speech.returncode, job_id[:8])
+            raise ValueError("Speech transcription could not finish on this server. Try a shorter source or retry later.")
+        transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        words = transcript.get("words", [])
+        language = transcript.get("language", "unknown")
+        transcript_path.unlink(missing_ok=True)
         job.update(stage="Ranking speech highlights", updated=time.time())
+        logger.info("highlights stage=transcription_complete job=%s count=%s", job_id[:8], len(words))
         if len(words) < 6:
             raise ValueError("Not enough recognizable speech to find meaningful highlights.")
-        language = info.language
-        # Release the speech model before 4K FFmpeg work on a memory-limited host.
-        del segments, info, model
-        gc.collect()
         highlights = rank_moments(words, duration, clip_length, clip_count)
         if not highlights:
             raise ValueError("No suitable spoken highlights were found at that length. Try shorter clips or a speech-heavy video.")
@@ -330,6 +332,8 @@ def analyze(job_id: str, folder: str, source_path: str,
         clips = []
         for i, highlight in enumerate(highlights, start=1):
             job.update(stage=f"Rendering {output_quality.upper()} video {i} of {len(highlights)}", updated=time.time())
+            logger.info("highlights stage=render_started job=%s clip=%s quality=%s layout=%s",
+                        job_id[:8], i, output_quality, video_layout)
             output_path = Path(folder) / f"clip_{i}.mp4"
             subtitle_path = None
             if captions:
@@ -342,6 +346,7 @@ def analyze(job_id: str, folder: str, source_path: str,
                                 subtitle_path, output_quality, video_layout)
             if subtitle_path:
                 subtitle_path.unlink(missing_ok=True)
+            logger.info("highlights stage=render_complete job=%s clip=%s", job_id[:8], i)
             clips.append({"rank": i, "filename": f"clips4u-highlight-{i}.mp4",
                           "bytes": output_path.stat().st_size, "captions": captions,
                           "width": OUTPUT_SIZES[output_quality][0],
@@ -352,6 +357,7 @@ def analyze(job_id: str, folder: str, source_path: str,
         Path(source_path).unlink(missing_ok=True)
         audio_path.unlink(missing_ok=True)
         job["output_dir"] = folder
+        logger.info("highlights stage=complete job=%s clips=%s", job_id[:8], len(clips))
         job.update(status="complete", stage=f"{len(clips)} MP4 clips ready", result={
             "highlights": highlights,
             "clips": clips,
