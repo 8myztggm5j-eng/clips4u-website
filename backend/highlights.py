@@ -12,10 +12,12 @@ import shutil
 import subprocess
 import tempfile
 import time
+from threading import Timer
 from pathlib import Path
 from secrets import token_urlsafe
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 router = APIRouter()
 logger = logging.getLogger("clips4u.highlights")
@@ -44,6 +46,8 @@ def cleanup_jobs() -> None:
     now = time.time()
     for ident, job in list(JOBS.items()):
         if job.get("status") in ("complete", "error") and now - job.get("updated", now) > EXPIRE_SECONDS:
+            if job.get("output_dir"):
+                shutil.rmtree(job["output_dir"], ignore_errors=True)
             del JOBS[ident]
 
 
@@ -129,10 +133,50 @@ def rank_moments(words: list[dict], duration: float) -> list[dict]:
         selected.append(item)
         if len(selected) == 3:
             break
+    # If the strongest passages overlap, allow distinct overlapping suggestions
+    # rather than forcing a single result when three plausible moments exist.
+    if len(selected) < 3:
+        for item in candidates:
+            if item in selected:
+                continue
+            if any(abs(item["start"] - prior["start"]) < 7 for prior in selected):
+                continue
+            if any((max(0, min(item["end"], prior["end"]) - max(item["start"], prior["start"])))
+                   > 0.65 * min(item["end"] - item["start"], prior["end"] - prior["start"])
+                   for prior in selected):
+                continue
+            selected.append(item)
+            if len(selected) == 3:
+                break
     selected.sort(key=lambda x: -x["score"])
     for i, item in enumerate(selected):
         item["rank"] = i + 1
     return selected
+
+
+
+def render_vertical_mp4(source_path: str, target: Path, start: float, end: float) -> None:
+    """Produce a stand-alone iPhone-friendly 540x960 clip without any external URL fetching."""
+    seconds = round(end - start, 2)
+    if not 0 < seconds <= 61:
+        raise ValueError("Invalid highlight timestamps")
+    try:
+        result = subprocess.run([
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-y", "-ss", str(start), "-i", source_path, "-t", str(seconds),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", "scale=540:960:force_original_aspect_ratio=increase,crop=540:960,setsar=1,fps=24",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-threads", "2", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "96k",
+            "-movflags", "+faststart", str(target)
+        ], capture_output=True, timeout=240)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Rendering took too long. Try a shorter source video.") from exc
+    if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
+        raise ValueError("Couldn't render one of the MP4 clips. Try a smaller or simpler video.")
+    if target.stat().st_size > MAX_BYTES:
+        raise ValueError("A rendered clip exceeded the size limit.")
 
 
 def analyze(job_id: str, folder: str, source_path: str) -> None:
@@ -170,13 +214,32 @@ def analyze(job_id: str, folder: str, source_path: str) -> None:
         highlights = rank_moments(words, duration)
         if not highlights:
             raise ValueError("No complete 15–60 second speech highlights found. Try a longer speaking video.")
-        job.update(status="complete", stage="Ready", result={
+        # Render the selected moments as real, separate MP4 files. No user
+        # interaction or on-device FFmpeg is required to produce the three clips.
+        clips = []
+        for i, highlight in enumerate(highlights, start=1):
+            job.update(stage=f"Rendering video {i} of {len(highlights)}", updated=time.time())
+            output_path = Path(folder) / f"clip_{i}.mp4"
+            render_vertical_mp4(source_path, output_path, highlight["start"], highlight["end"])
+            clips.append({"rank": i, "filename": f"clips4u-highlight-{i}.mp4",
+                          "bytes": output_path.stat().st_size})
+        # Retain only the short finished clips temporarily; discard source/audio
+        # before notifying the iPhone that all exports are available.
+        Path(source_path).unlink(missing_ok=True)
+        audio_path.unlink(missing_ok=True)
+        job["output_dir"] = folder
+        job.update(status="complete", stage="3 MP4 clips ready" if len(clips) == 3 else "MP4 clips ready", result={
             "highlights": highlights,
+            "clips": clips,
             "duration": round(duration, 1),
             "language": info.language,
             "method": "faster-whisper transcription + speech-content scoring",
-            "note": "Suggestions use speech, not visual excitement or a guarantee of engagement."
+            "note": "Rankings are based on speech; videos are 9:16 center-cropped MP4s. Source videos without enough distinct speech may yield fewer than three."
         }, updated=time.time())
+        # Clear temporary exported files even if no more API requests arrive.
+        expiration = Timer(EXPIRE_SECONDS + 60, cleanup_jobs)
+        expiration.daemon = True
+        expiration.start()
     except ValueError as exc:
         job.update(status="error", stage="Unable to analyze", error=str(exc), updated=time.time())
     except (subprocess.TimeoutExpired, Exception) as exc:
@@ -185,7 +248,8 @@ def analyze(job_id: str, folder: str, source_path: str) -> None:
                    error="Speech analysis couldn't finish on this server. Try a shorter video or retry later.",
                    updated=time.time())
     finally:
-        shutil.rmtree(folder, ignore_errors=True)
+        if job.get("status") != "complete":
+            shutil.rmtree(folder, ignore_errors=True)
         ACTIVE_JOB = None
 
 
@@ -237,4 +301,28 @@ def get_highlights(job_id: str, x_clips4u_key: str | None = Header(default=None)
     job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(404, "Analysis job has expired or the server restarted. Start a new analysis.")
-    return job
+    # Internal disk paths are never part of the API response.
+    return {key: value for key, value in job.items() if key not in ("output_dir",)}
+
+
+@router.get("/api/highlights/{job_id}/clip/{rank}")
+def download_highlight(job_id: str, rank: int, x_clips4u_key: str | None = Header(default=None)):
+    require_key(x_clips4u_key)
+    cleanup_jobs()
+    job = JOBS.get(job_id)
+    if not job or job.get("status") != "complete":
+        raise HTTPException(404, "Video clips aren't ready or have expired.")
+    clips = job.get("result", {}).get("clips", [])
+    if rank not in [clip["rank"] for clip in clips]:
+        raise HTTPException(404, "That clip is not available.")
+    folder = job.get("output_dir")
+    if not folder:
+        raise HTTPException(404, "Video clips have expired.")
+    file_path = Path(folder) / f"clip_{rank}.mp4"
+    if not file_path.is_file():
+        raise HTTPException(404, "Temporary video file has expired.")
+    return FileResponse(
+        str(file_path), media_type="video/mp4",
+        filename=f"clips4u-highlight-{rank}.mp4", content_disposition_type="attachment",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+    )
