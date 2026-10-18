@@ -197,7 +197,7 @@ def write_caption_file(words: list[dict], start: float, end: float, target: Path
 
 def render_vertical_mp4(source_path: str, target: Path, start: float, end: float,
                         subtitle_path: Path | None, output_quality: str = "540p",
-                        video_layout: str = "portrait_blur") -> None:
+                        video_layout: str = "blur") -> None:
     """Compose portrait or wide foreground with synchronized blurred backdrop.
 
     portrait_blur creates a sharp 9:16 center-cropped foreground with a narrow
@@ -275,8 +275,8 @@ def render_vertical_mp4(source_path: str, target: Path, start: float, end: float
         ]
         cmd.extend(filter_args)
         cmd.extend([
-            "-map", "0:a:0?", "-c:v", "libx264", "-preset", "ultrafast",
-            "-tune", "zerolatency", "-crf", "31" if is_4k else "28",
+            "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "22" if is_4k else "20",
             "-threads", "1" if is_4k else "2", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(target)
         ])
@@ -294,7 +294,7 @@ def render_vertical_mp4(source_path: str, target: Path, start: float, end: float
 
 def analyze(job_id: str, folder: str, source_path: str,
             clip_count: int, clip_length: int, captions: bool,
-            output_quality: str = "540p", video_layout: str = "portrait_blur") -> None:
+            output_quality: str = "540p", video_layout: str = "blur") -> None:
     global ACTIVE_JOB
     job = JOBS[job_id]
     try:
@@ -409,7 +409,7 @@ async def start_highlights(
     clip_length: int = Form(30),
     captions: bool = Form(True),
     output_quality: str = Form("540p"),
-    video_layout: str = Form("portrait_blur"),
+    video_layout: str = Form("blur"),
     x_clips4u_key: str | None = Header(default=None),
 ):
     global ACTIVE_JOB
