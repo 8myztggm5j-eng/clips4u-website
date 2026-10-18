@@ -1,0 +1,15 @@
+# Never commit server secrets or account credentials.
+.env
+*.env
+oracle/.env
+oracle/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local generated data
+__pycache__/
+*.py[cod]
+.DS_Store
+node_modules/
