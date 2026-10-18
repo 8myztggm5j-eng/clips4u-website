@@ -1,0 +1,11 @@
+# Domain from oracle/.env; Caddy obtains/renews a public HTTPS certificate.
+# Oracle VCN security rules AND the Ubuntu firewall must allow TCP 80 and 443.
+{$CLIPS4U_DOMAIN} {
+    encode gzip
+    header X-Content-Type-Options nosniff
+    reverse_proxy api:10000 {
+        transport http {
+            read_timeout 15m
+        }
+    }
+}
