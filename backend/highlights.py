@@ -81,9 +81,9 @@ def rank_moments(words: list[dict], duration: float, clip_length: int, clip_coun
     starts = [float(w["start"]) for w in words]
     candidates = []
     seen_starts = set()
-    for first in range(0, len(words), 4):
+    for first in range(0, len(words), 3):
         # Keep requested output lengths exact, even when a sentence ends early.
-        start = max(0.0, min(duration - clip_length, starts[first] - 0.5))
+        start = max(0.0, min(duration - clip_length, starts[first] - 0.25))
         start = round(start, 1)
         if start in seen_starts:
             continue
@@ -107,7 +107,15 @@ def rank_moments(words: list[dict], duration: float, clip_length: int, clip_coun
         score = 32 + min(15, count / 5.0) + min(14, hooks * 3.5)
         score += min(12, impact * 3.5) + min(8, script.count("?") * 3 + script.count("!") * 2)
         score += min(8, density * 2.0) + min(9, hook_at_start * 4)
-        score += 4 if ending.endswith((".", "!", "?")) else 0
+        preceding_gap = (float(selection[0]["start"]) - float(words[first_index - 1]["end"])) if first_index > 0 else 1.0
+        following_gap = (float(words[last_index]["start"]) - float(selection[-1]["end"])) if last_index < len(words) else 1.0
+        score += 7 if preceding_gap >= 0.35 else 0
+        score += 7 if following_gap >= 0.35 else 0
+        score += 7 if ending.endswith((".", "!", "?")) else 0
+        if beginning.lower().strip(" ,.!?") in ("and", "but", "so", "um", "uh", "because"):
+            score -= 7
+        if ending.endswith((",", ":", ";")):
+            score -= 6
         if beginning and beginning[0].isupper():
             score += 2
         if count < max(12, clip_length // 2):
@@ -124,6 +132,8 @@ def rank_moments(words: list[dict], duration: float, clip_length: int, clip_coun
             reasons.append("curiosity or question")
         if ending.endswith((".", "!", "?")):
             reasons.append("natural sentence ending")
+        if preceding_gap >= 0.35:
+            reasons.append("clean opening after a pause")
         if not reasons:
             reasons.append("continuous spoken content")
         candidates.append({
@@ -167,7 +177,7 @@ def subtitle_time(seconds: float) -> str:
 
 
 def write_caption_file(words: list[dict], start: float, end: float, target: Path) -> bool:
-    """Make relative-time SRT subtitles in 2-5 word blocks for readable mobile captions."""
+    """Make relative-time SRT subtitles in 2-4 word blocks for readable mobile captions."""
     timed = [w for w in words if float(w["end"]) > start and float(w["start"]) < end]
     lines = []
     group = []
@@ -178,7 +188,7 @@ def write_caption_file(words: list[dict], start: float, end: float, target: Path
         group.append((max(0.0, float(word["start"]) - start),
                       min(end - start, float(word["end"]) - start), token))
         span = group[-1][1] - group[0][0]
-        if len(group) >= 5 or span >= 2.5 or (len(group) >= 2 and token.endswith((".", "!", "?"))):
+        if len(group) >= 4 or span >= 1.8 or (len(group) >= 2 and token.endswith((".", "!", "?"))):
             lines.append(group)
             group = []
     if group:
@@ -216,10 +226,10 @@ def render_vertical_mp4(source_path: str, target: Path, start: float, end: float
     if subtitle_path:
         factor = width / 540
         style = (
-            f"FontName=DejaVu Sans,FontSize={round(19 * factor)},"
+            f"FontName=DejaVu Sans,FontSize={round(22 * factor)},Bold=1,"
             "PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,"
             f"BorderStyle=1,Outline={round(3 * factor)},Shadow={round(factor)},"
-            f"Alignment=2,MarginV={round(130 * factor)}"
+            f"Alignment=2,MarginV={round(185 * factor)}"
         )
     subtitle_filter = (
         f"subtitles=filename='{subtitle_path}':force_style='{style}'"
@@ -381,7 +391,7 @@ def analyze(job_id: str, folder: str, source_path: str,
             "height": OUTPUT_SIZES[output_quality][1],
             "language": language,
             "method": "faster-whisper transcription + speech-content scoring",
-            "note": "Portrait blur shows a sharp 9:16 center-cropped foreground over matching blurred footage. Wide source videos lose their outer sides. 4K is an upscale, not AI detail restoration."
+            "note": "Full-width blur preserves the complete landscape foreground over a blurred vertical background. 4K is an upscale, not AI detail restoration."
         }, updated=time.time())
         # Clear temporary exported files even if no more API requests arrive.
         expiration = Timer(EXPIRE_SECONDS + 60, cleanup_jobs)
