@@ -99,7 +99,7 @@ def source_from_url(url: str) -> tuple[str, str]:
     raise HTTPException(400, "Only YouTube and TikTok video links are supported")
 
 
-def checked_run(command: list[str], timeout: int, stage: str = 'download') -> subprocess.CompletedProcess:
+def checked_run(command: list[str], timeout: int, stage: str = 'download', provider: str = 'youtube') -> subprocess.CompletedProcess:
     # Show a specific, safe error category rather than an unhelpful generic 422.
     # Never log credentials, full command lines or raw stderr to avoid leaks.
     tool = Path(command[0]).name
@@ -131,6 +131,9 @@ def checked_run(command: list[str], timeout: int, stage: str = 'download') -> su
     elif "http error 429" in stderr or "too many requests" in stderr:
         category = "youtube_rate_limit"
         message = "YouTube temporarily limited requests from this server. Wait before trying again."
+    elif "unexpected response from webpage request" in stderr and provider == "tiktok":
+        category = "tiktok_unexpected_webpage"
+        message = "TikTok returned an unexpected webpage response to this server. The link is recognized, but TikTok may be restricting cloud downloads. Try an authorized local copy instead."
     elif "unsupported url" in stderr:
         category = "url_unsupported"
         message = "The video link is not supported by YouTube import."
@@ -145,7 +148,7 @@ def checked_run(command: list[str], timeout: int, stage: str = 'download') -> su
         message = "The video was retrieved, but conversion to MP4 failed. Try a shorter original MP4."
     else:
         category = "retrieval_failed"
-        message = "YouTube could not provide this video to the hosting server. Cloud-hosted downloads are not always available; try an authorized local video instead."
+        message = ("TikTok" if provider == "tiktok" else "YouTube") + " could not provide this video to the hosting server. Cloud-hosted downloads are not always available; try an authorized local video instead."
 
     logger.warning("import failure category=%s stage=%s tool=%s exit=%s", category, stage, tool, result.returncode)
     raise HTTPException(422, message)
@@ -157,7 +160,7 @@ def retrieve_public_video(video_url: str, provider: str) -> bytes:
     with tempfile.TemporaryDirectory(prefix="clips4u_") as temp:
         root = Path(temp)
         # Inspect first so long/livestream videos are rejected before downloading.
-        metadata = checked_run(base + ["--skip-download", "--dump-single-json", video_url], 70, stage="metadata")
+        metadata = checked_run(base + ["--skip-download", "--dump-single-json", video_url], 70, stage="metadata", provider=provider)
         try:
             info = json.loads(metadata.stdout)
         except (ValueError, TypeError):
@@ -174,7 +177,7 @@ def retrieve_public_video(video_url: str, provider: str) -> bytes:
             "--merge-output-format", "mp4",
             "-o", str(root / "source.%(ext)s"),
             video_url
-        ], TIMEOUT_SECONDS, stage="download")
+        ], TIMEOUT_SECONDS, stage="download", provider=provider)
         candidates = [p for p in root.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl"))]
         if len(candidates) != 1:
             raise HTTPException(422, "Could not prepare a single video file")
