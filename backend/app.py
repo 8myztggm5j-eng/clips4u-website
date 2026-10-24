@@ -85,9 +85,13 @@ def source_from_url(url: str) -> tuple[str, str]:
         return ("youtube", "https://www.youtube.com/watch?v=" + video_id)
     if host in ("www.tiktok.com", "tiktok.com", "m.tiktok.com"):
         match = re.fullmatch(r"/@([A-Za-z0-9._]+)/video/(\d+)/?", parts.path)
-        if not match:
-            raise HTTPException(400, "Use a public TikTok video link, such as tiktok.com/@creator/video/123...")
-        return ("tiktok", "https://www.tiktok.com/@" + match.group(1) + "/video/" + match.group(2))
+        if match:
+            return ("tiktok", "https://www.tiktok.com/@" + match.group(1) + "/video/" + match.group(2))
+        # The official TikTok Share action often provides a /t/CODE/ redirect.
+        short = re.fullmatch(r"/t/([A-Za-z0-9_-]+)/?", parts.path)
+        if short:
+            return ("tiktok", "https://www.tiktok.com/t/" + short.group(1) + "/")
+        raise HTTPException(400, "Use a public TikTok video link or official tiktok.com/t/ share link")
     if host in ("vm.tiktok.com", "vt.tiktok.com"):
         if not re.fullmatch(r"/[A-Za-z0-9]+/?", parts.path):
             raise HTTPException(400, "Invalid TikTok short link")
