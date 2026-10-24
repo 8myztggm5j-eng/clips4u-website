@@ -409,18 +409,19 @@
       </section>
 
       <section class="panel" id="youtubeImportPanel">
-        <h2 style="margin:0 0 8px;">Import a YouTube video link</h2>
+        <h2 style="margin:0 0 8px;">Import a YouTube or TikTok video link</h2>
         <p class="lede">For public videos you own or have permission to reuse. Requires your private Clips4U import server.</p>
         <div class="controls-grid" style="margin-top:12px;">
-          <div><label class="label-row" for="ytLink">YouTube video link</label>
-          <input id="ytLink" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=..." style="width:100%;min-height:46px;background:#071426;color:white;border:1px solid var(--line);border-radius:12px;padding:10px;"></div>
+          <div><label class="label-row" for="ytLink">YouTube or TikTok video link</label>
+          <input id="ytLink" type="url" inputmode="url" placeholder="Paste YouTube or TikTok video URL" style="width:100%;min-height:46px;background:#071426;color:white;border:1px solid var(--line);border-radius:12px;padding:10px;"></div>
           <div><label class="label-row" for="ytServer">Backend URL (Oracle or Render)</label>
           <input id="ytServer" type="url" inputmode="url" placeholder="https://clips4u.YOUR-IP.sslip.io" style="width:100%;min-height:46px;background:#071426;color:white;border:1px solid var(--line);border-radius:12px;padding:10px;"></div>
           <div><label class="label-row" for="ytKey">Private access key</label>
           <input id="ytKey" type="password" autocomplete="off" placeholder="Private key configured in Render" style="width:100%;min-height:46px;background:#071426;color:white;border:1px solid var(--line);border-radius:12px;padding:10px;"></div>
           <label style="display:flex;gap:10px;color:var(--muted);font-size:.9rem;"><input id="ytRights" type="checkbox" style="width:20px;height:20px;flex:0 0 auto;accent-color:var(--blue);"><span>I own this video or have permission to download and edit it.</span></label>
-          <button class="button" id="ytImportBtn" type="button">Import YouTube video</button>
-          <div class="meta" id="ytImportStatus" role="status" aria-live="polite">Connect your backend to import public videos up to 10 minutes and 90 MB.</div>
+          <button class="button" id="ytImportBtn" type="button">Import Video</button>
+          <a id="importDownloadLink" class="button" style="display:none;text-align:center" download="clips4u-import.mp4">Download Original MP4</a>
+          <div class="meta" id="ytImportStatus" role="status" aria-live="polite">Import permitted public videos up to 10 minutes and 90 MB. Download the MP4 or edit it in Clips4U.</div>
         </div>
         <div class="info-note">Your local video picker still works without the backend. Cloud servers may be blocked from downloading some YouTube videos.</div>
       </section>
@@ -1015,6 +1016,7 @@
     ytImportBtn.addEventListener('click', async () => {
       if (state.busy || state.importing) return;
       const youtubeURL = ytLink.value.trim();
+      const importDownloadLink = document.getElementById('importDownloadLink');
       const backendURL = ytServer.value.trim().replace(/\/+$/, '');
       const key = ytKey.value.trim();
       try {
@@ -1023,21 +1025,21 @@
           throw new Error('Invalid backend URL');
         }
       } catch (e) {
-        ytImportStatus.textContent = 'Enter the Render HTTPS service URL without /api/import.';
+        ytImportStatus.textContent = 'Enter your Oracle HTTPS backend URL without /api/import.';
         return;
       }
       try {
         const inputURL = new URL(youtubeURL);
         const host = inputURL.hostname.toLowerCase();
-        if (inputURL.protocol !== 'https:' || !['youtube.com','www.youtube.com','m.youtube.com','youtu.be','www.youtu.be'].includes(host)) {
+        if (inputURL.protocol !== 'https:' || !['youtube.com','www.youtube.com','m.youtube.com','youtu.be','www.youtu.be','tiktok.com','www.tiktok.com','m.tiktok.com','vm.tiktok.com','vt.tiktok.com'].includes(host)) {
           throw new Error('Invalid YouTube URL');
         }
       } catch (e) {
-        ytImportStatus.textContent = 'Paste a complete YouTube watch, Shorts or youtu.be URL.';
+        ytImportStatus.textContent = 'Paste a public YouTube or TikTok video link.';
         return;
       }
       if (key.length < 16) {
-        ytImportStatus.textContent = 'Enter your private access key from the Render environment.';
+        ytImportStatus.textContent = 'Enter your private Clips4U backend access key.';
         return;
       }
       if (!ytRights.checked) {
@@ -1049,7 +1051,11 @@
       ytImportBtn.disabled = true;
       processBtn.disabled = true;
       videoInput.disabled = true;
-      ytImportStatus.textContent = 'Retrieving the YouTube video. This may take a few minutes. Keep this tab open.';
+      ytImportStatus.textContent = 'Retrieving video. This may take a few minutes. Keep this tab open.';
+      if (importDownloadLink.dataset.blobUrl) URL.revokeObjectURL(importDownloadLink.dataset.blobUrl);
+      importDownloadLink.style.display = 'none';
+      importDownloadLink.removeAttribute('href');
+      delete importDownloadLink.dataset.blobUrl;
       try {
         try {
           localStorage.setItem('clips4uImportServer', backendURL);
@@ -1073,12 +1079,16 @@
         if (declared > 95 * 1024 * 1024) throw new Error('Video exceeds the mobile import size limit');
         const blob = await response.blob();
         if (!blob.size || blob.size > 95 * 1024 * 1024) throw new Error('Video was empty or too large');
-        const file = new File([blob], 'clips4u-youtube-import.mp4', {type:'video/mp4'});
+        const file = new File([blob], 'clips4u-video-import.mp4', {type:'video/mp4'});
+        const savedUrl = URL.createObjectURL(blob);
+        importDownloadLink.href = savedUrl;
+        importDownloadLink.dataset.blobUrl = savedUrl;
+        importDownloadLink.style.display = 'inline-block';
         loadSelectedVideo(file);
-        ytImportStatus.textContent = 'Import complete! Set start/end times and Process clip.';
+        ytImportStatus.textContent = 'Video imported! Tap Download Original MP4 to save it, or generate clips below.';
         ytLink.value = '';
       } catch (error) {
-        ytImportStatus.textContent = 'Import failed: ' + (error.message || error) + '. YouTube may block cloud servers; local file import is always available.';
+        ytImportStatus.textContent = 'Import failed: ' + (error.message || error) + '. Some videos restrict downloads; local file import remains available.';
       } finally {
         state.importing = false;
         ytImportBtn.disabled = false;
