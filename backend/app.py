@@ -1,4 +1,4 @@
-"""Clips4U private, short-video YouTube importer.
+"""Clips4U private, short-video YouTube and TikTok importer.
 
 Only for public videos the operator owns or is allowed to reuse.
 No cookies, accounts, playlist downloads, DRM bypass or login support.
@@ -71,6 +71,30 @@ def video_id_from_url(url: str) -> str:
         raise HTTPException(400, "Could not find a valid 11-character YouTube video ID")
     return value
 
+def source_from_url(url: str) -> tuple[str, str]:
+    """Allow only recognized HTTPS video URLs; never accept arbitrary fetch hosts."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise HTTPException(400, "Invalid video URL")
+    if parts.scheme != "https" or parts.username or parts.password or parts.port:
+        raise HTTPException(400, "Use a standard HTTPS video link")
+    host = (parts.hostname or "").lower()
+    if host in ("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"):
+        video_id = video_id_from_url(url)
+        return ("youtube", "https://www.youtube.com/watch?v=" + video_id)
+    if host in ("www.tiktok.com", "tiktok.com", "m.tiktok.com"):
+        match = re.fullmatch(r"/@([A-Za-z0-9._]+)/video/(\d+)/?", parts.path)
+        if not match:
+            raise HTTPException(400, "Use a public TikTok video link, such as tiktok.com/@creator/video/123...")
+        return ("tiktok", "https://www.tiktok.com/@" + match.group(1) + "/video/" + match.group(2))
+    if host in ("vm.tiktok.com", "vt.tiktok.com"):
+        if not re.fullmatch(r"/[A-Za-z0-9]+/?", parts.path):
+            raise HTTPException(400, "Invalid TikTok short link")
+        return ("tiktok", "https://" + host + parts.path)
+    raise HTTPException(400, "Only YouTube and TikTok video links are supported")
+
+
 def checked_run(command: list[str], timeout: int, stage: str = 'download') -> subprocess.CompletedProcess:
     # Show a specific, safe error category rather than an unhelpful generic 422.
     # Never log credentials, full command lines or raw stderr to avoid leaks.
@@ -122,8 +146,7 @@ def checked_run(command: list[str], timeout: int, stage: str = 'download') -> su
     logger.warning("import failure category=%s stage=%s tool=%s exit=%s", category, stage, tool, result.returncode)
     raise HTTPException(422, message)
 
-def retrieve_public_video(video_id: str) -> bytes:
-    video_url = "https://www.youtube.com/watch?v=" + video_id
+def retrieve_public_video(video_url: str, provider: str) -> bytes:
     base = ["yt-dlp", "--ignore-config", "--no-playlist", "--no-warnings",
             "--socket-timeout", "15", "--retries", "1", "--fragment-retries", "1",
             "--js-runtimes", "node"]
@@ -134,7 +157,7 @@ def retrieve_public_video(video_id: str) -> bytes:
         try:
             info = json.loads(metadata.stdout)
         except (ValueError, TypeError):
-            raise HTTPException(422, "Unable to read YouTube video information")
+            raise HTTPException(422, "Unable to read video information")
         duration = info.get("duration")
         if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
             raise HTTPException(422, "Live streams are not supported")
@@ -143,7 +166,7 @@ def retrieve_public_video(video_id: str) -> bytes:
         # Prefer a single mobile-friendly progressive MP4 stream.
         checked_run(base + [
             "--max-filesize", "90M",
-            "-f", "b[ext=mp4][height<=720]/b[height<=720]/bv[height<=720]+ba/bv+ba/best",
+            "-f", "b[ext=mp4][height<=720]/b[height<=720]/bv[height<=720]+ba/bv+ba/best" if provider == "youtube" else "best[height<=720]/best",
             "--merge-output-format", "mp4",
             "-o", str(root / "source.%(ext)s"),
             video_url
@@ -190,16 +213,16 @@ async def import_video(data: ImportRequest, x_clips4u_key: str | None = Header(d
         raise HTTPException(401, "Incorrect Clips4U import key")
     if not data.rights_confirmed:
         raise HTTPException(400, "Confirm that you own or may reuse this video")
-    vid = video_id_from_url(data.url)
+    provider, safe_url = source_from_url(data.url)
     if lock.locked():
         raise HTTPException(429, "An import is in progress. Please retry shortly.")
     async with lock:
-        output = await run_in_threadpool(retrieve_public_video, vid)
+        output = await run_in_threadpool(retrieve_public_video, safe_url, provider)
     return Response(
         content=output,
         media_type="video/mp4",
         headers={
-            "Content-Disposition": 'attachment; filename="clips4u-youtube-' + vid + '.mp4"',
+            "Content-Disposition": 'attachment; filename="clips4u-' + provider + '-import.mp4"',
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
         },
